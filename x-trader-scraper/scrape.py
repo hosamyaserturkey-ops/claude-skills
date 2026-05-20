@@ -99,25 +99,28 @@ def run_scrape(token: str, keywords: list[str], max_tweets: int) -> list[dict]:
     print(f"Starting Apify actor '{ACTOR_ID}' with {len(keywords)} keywords, max_items={max_tweets}", flush=True)
     # Use start() + manual polling instead of call() to avoid a Pydantic
     # ValidationError in apify_client that fires when ActorResponse.pricingInfos
-    # contains new pricing model variants the client model doesn't tolerate.
+    # contains pricing model variants the client model doesn't tolerate.
+    # apify_client v3 returns typed Run objects (not dicts), so use attribute access.
     run_info = client.actor(ACTOR_ID).start(run_input=run_input)
-    run_id = run_info["id"]
+    run_id = run_info.id
     print(f"Run started: {run_id}", flush=True)
 
     while True:
         run_status = client.run(run_id).get()
-        status = run_status.get("status", "")
+        if run_status is None:
+            raise RuntimeError(f"Run {run_id} not found while polling")
+        status = run_status.status
         print(f"Run status: {status}", flush=True)
         if status in _TERMINAL_STATUSES:
             break
         time.sleep(10)
 
-    if run_status.get("status") != "SUCCEEDED":
-        raise RuntimeError(f"Actor run ended with status '{run_status.get('status')}': {run_status}")
+    if run_status.status != "SUCCEEDED":
+        raise RuntimeError(f"Actor run ended with status '{run_status.status}': {run_status}")
 
-    dataset_id = run_status.get("defaultDatasetId")
+    dataset_id = run_status.default_dataset_id
     if not dataset_id:
-        raise RuntimeError(f"No defaultDatasetId in run result: {run_status}")
+        raise RuntimeError(f"No default_dataset_id in run result: {run_status}")
 
     print(f"Run completed, fetching dataset {dataset_id}", flush=True)
     items = list(client.dataset(dataset_id).iterate_items())
