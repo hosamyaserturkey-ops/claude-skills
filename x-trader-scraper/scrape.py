@@ -17,16 +17,16 @@ from apify_client import ApifyClient
 
 
 DEFAULT_KEYWORDS = [
-    "$SPY",
-    "$QQQ",
-    "$BTC",
-    "$ES_F",
+    "Propr",
+    "Prop Firm",
+    "FTMO",
+    "funded trader",
+    "funded account",
+    "prop trading",
     "day trading",
-    "swing trade",
-    "options trader",
-    "futures trader",
-    "crypto trader",
-    "price action",
+    "TopstepTrader",
+    "MyForexFunds",
+    "The5ers",
 ]
 
 ACTOR_ID = "apidojo/tweet-scraper"

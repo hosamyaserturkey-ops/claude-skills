@@ -34,16 +34,19 @@ jobs:
       - name: Run scraper
         env:
           APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+          KEYWORDS: ${{ inputs.keywords }}
         run: |
           if [ -z "$APIFY_API_TOKEN" ]; then
             echo "::error::APIFY_API_TOKEN secret is not set. Add it under Settings → Secrets and variables → Actions."
             exit 1
           fi
-          if [ -n "${{ inputs.keywords }}" ]; then
+          if [ -n "$KEYWORDS" ]; then
+            # Split the space-separated keywords string into an array safely
+            read -ra kw_array <<< "$KEYWORDS"
             python3 x-trader-scraper/scrape.py \
               --max-tweets "${{ inputs.max_tweets }}" \
               --output traders.xlsx \
-              --keywords ${{ inputs.keywords }}
+              --keywords "${kw_array[@]}"
           else
             python3 x-trader-scraper/scrape.py \
               --max-tweets "${{ inputs.max_tweets }}" \
