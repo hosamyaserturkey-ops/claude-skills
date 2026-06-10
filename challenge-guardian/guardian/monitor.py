@@ -23,6 +23,7 @@ def run_monitor(
     status_every: int = 60,
     max_iterations: int | None = None,
     trade_alerts: bool = True,
+    status_board=None,
 ) -> int:
     """Run the monitoring loop. Returns an exit code (0 = passed/stopped, 2 = breached)."""
     state = load_state(state_path)
@@ -67,6 +68,16 @@ def run_monitor(
         for event in events:
             dispatch(alerters, event, label)
         save_state(state_path, state)
+
+        if status_board is not None:
+            status_board.update(
+                label,
+                equity=snapshot.equity,
+                daily_floor=daily_loss_floor(cfg, state),
+                dd_floor=drawdown_floor(cfg, state),
+                peak=state.peak_equity,
+                positions=len(snapshot.open_positions),
+            )
 
         if iteration % status_every == 1:
             dl_floor = daily_loss_floor(cfg, state)

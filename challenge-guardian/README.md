@@ -114,7 +114,22 @@ For each poll it computes the exact breach floors and fires:
   are flying blind
 
 Warnings de-duplicate (no spam every poll) and re-arm after equity recovers
-or the trading day rolls over. Equity follows the official SDK formula
+or the trading day rolls over.
+
+## Telegram commands
+
+When Telegram alerts are configured, the bot also listens for commands —
+only from your own chat ID; everyone else is ignored:
+
+- `/status` — live equity, breach floors, headroom, and open positions for
+  every guarded account
+- `/help` — command list
+
+Commands are read-only: the bot watches and warns, it never trades. Disable
+with `--no-telegram-commands` or `GUARDIAN_TELEGRAM_COMMANDS=off`. Telegram
+allows one command listener per bot token, so when running locally and hosted
+at the same time, leave commands enabled on only one of them (alerts are
+unaffected). Equity follows the official SDK formula
 (`balance + totalUnrealizedPnl + isolatedPositionMargin`), and the server's
 `highWaterMark` is merged into the trailing-drawdown peak so the floor can
 only tighten, never loosen.
