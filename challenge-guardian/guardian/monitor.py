@@ -10,14 +10,13 @@ import requests
 
 from .alerts import dispatch
 from .config import ChallengeConfig
-from .hyperliquid import HyperliquidInfoClient
-from .rules import daily_loss_floor, drawdown_floor, evaluate
+from .rules import BREACH, PASSED, RuleEvent, daily_loss_floor, drawdown_floor, evaluate
 from .state import load_state, save_state
 
 
 def run_monitor(
     cfg: ChallengeConfig,
-    client: HyperliquidInfoClient,
+    client,
     alerters: list,
     state_path: Path,
     poll_interval: float = 10.0,
@@ -26,7 +25,7 @@ def run_monitor(
 ) -> int:
     """Run the monitoring loop. Returns an exit code (0 = passed/stopped, 2 = breached)."""
     state = load_state(state_path)
-    label = f"{cfg.name} ({client.address[:6]}…{client.address[-4:]})"
+    label = f"{cfg.name} ({client.label})"
     print(f"Guarding {label}: starting balance ${cfg.starting_balance:,.2f}, "
           f"daily loss {cfg.max_daily_loss_pct:.0%}, "
           f"drawdown {cfg.max_drawdown_pct:.0%} "
@@ -48,7 +47,7 @@ def run_monitor(
             print(f"Fetch failed ({consecutive_failures}): {exc}", file=sys.stderr, flush=True)
             if consecutive_failures >= 10:
                 dispatch_all(alerters, label,
-                             "🛑 Guardian lost contact with the Hyperliquid API "
+                             "🛑 Guardian lost contact with the API "
                              "(10 consecutive failures). Equity is NOT being monitored.")
                 consecutive_failures = 0
             if max_iterations is not None and iteration >= max_iterations:
@@ -56,7 +55,13 @@ def run_monitor(
             time.sleep(min(poll_interval * consecutive_failures, 60) or poll_interval)
             continue
 
+        # A server-tracked high-water mark can only tighten a trailing floor,
+        # never loosen it, so merge it into the local peak before evaluating.
+        if snapshot.high_water_mark is not None:
+            state.peak_equity = max(state.peak_equity, snapshot.high_water_mark)
+
         events = evaluate(cfg, state, snapshot.equity)
+        events.extend(_server_verdict(snapshot, state))
         for event in events:
             dispatch(alerters, event, label)
         save_state(state_path, state)
@@ -72,9 +77,45 @@ def run_monitor(
         if state.breached:
             print("Account breached. Stopping monitor.", flush=True)
             return 2
+        if state.passed and snapshot.server_status in ("passed",):
+            print("Challenge passed (server-confirmed). Stopping monitor.", flush=True)
+            return 0
         if max_iterations is not None and iteration >= max_iterations:
             return 0
         time.sleep(poll_interval)
+
+
+def _server_verdict(snapshot, state) -> list[RuleEvent]:
+    """Propr's risk engine is the source of truth: if the server says the
+    account failed or passed, report that verdict even if local math missed it."""
+    status = snapshot.server_status
+    if not status or status == "active":
+        return []
+    verdict = _terminal(status)
+    if verdict == "failed" and not state.breached:
+        state.breached = True
+        reason = snapshot.server_reason or "no reason given"
+        return [RuleEvent(
+            severity=BREACH, rule="server",
+            message=f"Propr marked this account '{status}' (reason: {reason}).",
+            equity=snapshot.equity, limit=0.0, headroom=0.0,
+        )]
+    if verdict == "passed" and not state.passed:
+        state.passed = True
+        return [RuleEvent(
+            severity=PASSED, rule="server",
+            message="Propr marked this challenge as PASSED. Congratulations!",
+            equity=snapshot.equity, limit=0.0, headroom=0.0,
+        )]
+    return []
+
+
+def _terminal(status: str) -> str | None:
+    if status in ("failed", "closed"):
+        return "failed"
+    if status == "passed":
+        return "passed"
+    return None
 
 
 def dispatch_all(alerters: list, label: str, text: str) -> None:

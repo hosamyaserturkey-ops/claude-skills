@@ -1,29 +1,48 @@
-"""CLI entry point: python -m guardian --address 0x... --balance 10000 --preset 1step"""
+"""CLI entry point.
+
+Propr mode (recommended):   python -m guardian --preset 1step
+                            (reads PROPR_API_KEY from the environment;
+                            balance is auto-detected when possible)
+Hyperliquid wallet mode:    python -m guardian --address 0x... --balance 10000
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .alerts import ConsoleAlerter, DiscordAlerter, TelegramAlerter
 from .config import ChallengeConfig, make_preset
 from .hyperliquid import MAINNET_URL, TESTNET_URL, HyperliquidInfoClient
 from .monitor import run_monitor
+from .propr import DEFAULT_URL as PROPR_URL, ProprClient
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="guardian",
-        description="Monitor a Propr challenge account on Hyperliquid and alert "
-                    "before daily-loss or drawdown breaches.",
+        description="Monitor a Propr challenge account and alert before "
+                    "daily-loss or drawdown breaches.",
     )
+    p.add_argument("--api-key", default=os.environ.get("PROPR_API_KEY"),
+                   help="Propr API key from app.propr.xyz/settings "
+                        "(or env PROPR_API_KEY). Enables Propr mode.")
+    p.add_argument("--builder-id", default=os.environ.get("PROPR_BUILDER_ID"),
+                   help="Optional Propr builder code (or env PROPR_BUILDER_ID).")
+    p.add_argument("--propr-url", default=os.environ.get("PROPR_API_URL", PROPR_URL),
+                   help="Propr API base URL (or env PROPR_API_URL). "
+                        "Point at the beta environment to test.")
     p.add_argument("--address", default=os.environ.get("GUARDIAN_ADDRESS"),
-                   help="Wallet address of the challenge account (or env GUARDIAN_ADDRESS).")
+                   help="Hyperliquid wallet address — only for accounts trading "
+                        "directly on Hyperliquid (or env GUARDIAN_ADDRESS).")
     p.add_argument("--balance", type=float,
                    default=float(os.environ.get("GUARDIAN_BALANCE", 0) or 0),
-                   help="Challenge starting balance in USDC (or env GUARDIAN_BALANCE).")
+                   help="Challenge starting balance in USDC. In Propr mode this "
+                        "is auto-detected when possible.")
     p.add_argument("--preset", default=os.environ.get("GUARDIAN_PRESET", "1step"),
                    choices=["1step", "2step-1", "2step-2", "funded"],
                    help="Propr challenge type (default: 1step).")
@@ -41,30 +60,38 @@ def build_parser() -> argparse.ArgumentParser:
                    default=float(os.environ.get("GUARDIAN_POLL_INTERVAL", 10)),
                    help="Seconds between equity checks (default: 10).")
     p.add_argument("--state-file", default=None,
-                   help="Path for persisted state (default: ./state/<address>.json).")
-    p.add_argument("--testnet", action="store_true", help="Use Hyperliquid testnet.")
+                   help="Path for persisted state (default: ./state/<account>.json).")
+    p.add_argument("--testnet", action="store_true",
+                   help="Hyperliquid mode only: use the testnet.")
     p.add_argument("--once", action="store_true",
                    help="Do a single check and exit (useful for cron or smoke tests).")
+    p.add_argument("--probe", action="store_true",
+                   help="Propr mode only: dump raw API responses for debugging and exit.")
     return p
 
 
-def build_config(args: argparse.Namespace) -> ChallengeConfig:
-    base = make_preset(args.preset, args.balance)
-    overrides = {}
+def build_config(args: argparse.Namespace, balance: float, detected: dict) -> ChallengeConfig:
+    cfg = make_preset(args.preset, balance)
+    # Precedence: CLI flag > value detected from the Propr API > preset default.
+    detected_overrides = {
+        k: v for k, v in detected.items()
+        if k in ("max_daily_loss_pct", "max_drawdown_pct")
+    }
+    cli_overrides = {}
     if args.max_daily_loss is not None:
-        overrides["max_daily_loss_pct"] = args.max_daily_loss
+        cli_overrides["max_daily_loss_pct"] = args.max_daily_loss
     if args.max_drawdown is not None:
-        overrides["max_drawdown_pct"] = args.max_drawdown
+        cli_overrides["max_drawdown_pct"] = args.max_drawdown
     if args.profit_target is not None:
-        overrides["profit_target_pct"] = args.profit_target
+        cli_overrides["profit_target_pct"] = args.profit_target
     if args.trailing_mode is not None:
-        overrides["trailing_mode"] = args.trailing_mode
+        cli_overrides["trailing_mode"] = args.trailing_mode
     if args.warn_levels is not None:
-        overrides["warn_levels"] = tuple(sorted(args.warn_levels))
-    if not overrides:
-        return base
-    from dataclasses import replace
-    return replace(base, **overrides)
+        cli_overrides["warn_levels"] = tuple(sorted(args.warn_levels))
+    overrides = {**detected_overrides, **cli_overrides}
+    if detected_overrides:
+        print(f"Using limits from the Propr API: {detected_overrides}", flush=True)
+    return replace(cfg, **overrides) if overrides else cfg
 
 
 def build_alerters() -> list:
@@ -83,22 +110,42 @@ def build_alerters() -> list:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if not args.address:
-        print("--address (or GUARDIAN_ADDRESS) is required.", file=sys.stderr)
-        return 1
-    if args.balance <= 0:
-        print("--balance (or GUARDIAN_BALANCE) must be a positive starting balance.",
+
+    detected: dict = {}
+    if args.api_key:
+        client = ProprClient(args.api_key, base_url=args.propr_url,
+                             builder_id=args.builder_id)
+        if args.probe:
+            client.probe()
+            return 0
+        client.discover()
+        print(f"Found {client.kind} account: {client.account_id}", flush=True)
+        detected = client.detect_challenge_config()
+        balance = args.balance or detected.get("starting_balance", 0)
+        if balance <= 0:
+            print("Could not auto-detect the starting balance — pass it with "
+                  "--balance, e.g. --balance 10000.", file=sys.stderr)
+            return 1
+        state_key = re.sub(r"[^A-Za-z0-9._-]", "_", client.account_id)
+    elif args.address:
+        if args.balance <= 0:
+            print("--balance (or GUARDIAN_BALANCE) must be a positive starting "
+                  "balance in wallet mode.", file=sys.stderr)
+            return 1
+        client = HyperliquidInfoClient(
+            args.address,
+            base_url=TESTNET_URL if args.testnet else MAINNET_URL,
+        )
+        balance = args.balance
+        state_key = args.address.lower()
+    else:
+        print("Provide a Propr API key (--api-key or env PROPR_API_KEY) — or, for "
+              "accounts trading directly on Hyperliquid, a wallet --address.",
               file=sys.stderr)
         return 1
 
-    cfg = build_config(args)
-    client = HyperliquidInfoClient(
-        args.address,
-        base_url=TESTNET_URL if args.testnet else MAINNET_URL,
-    )
-    state_path = Path(args.state_file) if args.state_file else (
-        Path("state") / f"{args.address.lower()}.json"
-    )
+    cfg = build_config(args, balance, detected)
+    state_path = Path(args.state_file) if args.state_file else Path("state") / f"{state_key}.json"
     return run_monitor(
         cfg,
         client,

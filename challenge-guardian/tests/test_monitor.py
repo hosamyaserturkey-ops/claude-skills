@@ -11,7 +11,7 @@ from guardian.state import load_state
 
 
 class StubClient:
-    address = "0x" + "ab" * 20
+    label = "stub"
 
     def __init__(self, equities):
         self.equities = list(equities)
