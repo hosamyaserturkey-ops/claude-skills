@@ -77,6 +77,46 @@ def test_discover_falls_back_to_challenge():
     assert client.record_id == ATTEMPT_ID
 
 
+TWO_ACCOUNT_RESPONSES = {
+    **BASE_RESPONSES,
+    "/challenge-attempts": {"data": [
+        {"attemptId": "urn:prp-attempt:a1", "accountId": "urn:prp-account:firstAAA",
+         "challengeId": "urn:prp-challenge:c1", "status": "active"},
+        {"attemptId": "urn:prp-attempt:a2", "accountId": "urn:prp-account:secondBB",
+         "challengeId": "urn:prp-challenge:c2", "status": "active"},
+    ]},
+}
+
+
+def test_discover_defaults_to_first_of_many():
+    client = FakeProprClient(dict(TWO_ACCOUNT_RESPONSES))
+    client.discover()
+    assert client.account_id == "urn:prp-account:firstAAA"
+    assert len(client.accounts) == 2
+
+
+def test_discover_selects_by_number():
+    client = FakeProprClient(dict(TWO_ACCOUNT_RESPONSES))
+    client.discover("2")
+    assert client.account_id == "urn:prp-account:secondBB"
+
+
+def test_discover_selects_by_id_fragment():
+    client = FakeProprClient(dict(TWO_ACCOUNT_RESPONSES))
+    client.discover("secondbb")  # case-insensitive substring
+    assert client.account_id == "urn:prp-account:secondBB"
+
+
+def test_discover_rejects_bad_selector():
+    client = FakeProprClient(dict(TWO_ACCOUNT_RESPONSES))
+    with pytest.raises(SystemExit):
+        client.discover("9")
+    with pytest.raises(SystemExit):
+        client.discover("nope")
+    with pytest.raises(SystemExit):
+        client.discover("urn:prp-account")  # ambiguous: matches both
+
+
 def test_discover_with_no_accounts_exits():
     client = FakeProprClient({
         "/book-account-issuances": {"data": []},

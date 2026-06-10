@@ -19,7 +19,7 @@ from .alerts import ConsoleAlerter, DiscordAlerter, TelegramAlerter
 from .config import ChallengeConfig, make_preset
 from .hyperliquid import MAINNET_URL, TESTNET_URL, HyperliquidInfoClient
 from .monitor import run_monitor
-from .propr import DEFAULT_URL as PROPR_URL, ProprClient
+from .propr import DEFAULT_URL as PROPR_URL, ProprClient, format_accounts
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Do a single check and exit (useful for cron or smoke tests).")
     p.add_argument("--probe", action="store_true",
                    help="Propr mode only: dump raw API responses for debugging and exit.")
+    p.add_argument("--list-accounts", action="store_true",
+                   help="Propr mode only: list your active accounts and exit.")
+    p.add_argument("--account", default=os.environ.get("GUARDIAN_ACCOUNT"),
+                   help="Which account to guard when you have several: a number "
+                        "from --list-accounts (1, 2, ...) or part of the account id. "
+                        "Run one guardian per account, each with its own --account.")
     return p
 
 
@@ -118,8 +124,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.probe:
             client.probe()
             return 0
-        client.discover()
+        if args.list_accounts:
+            accounts = client.list_accounts()
+            if not accounts:
+                print("No active accounts found.", flush=True)
+            else:
+                print(f"Active accounts ({len(accounts)}):\n{format_accounts(accounts)}\n"
+                      "Guard one with: python -m guardian --account <number>", flush=True)
+            return 0
+        client.discover(args.account)
         print(f"Found {client.kind} account: {client.account_id}", flush=True)
+        if len(client.accounts) > 1 and not args.account:
+            others = len(client.accounts) - 1
+            print(f"⚠️  You have {others} other active account(s) NOT being guarded:\n"
+                  f"{format_accounts(client.accounts)}\n"
+                  "Open another window and run the guardian with --account <number> "
+                  "for each one.", flush=True)
         detected = client.detect_challenge_config()
         balance = args.balance or detected.get("starting_balance", 0)
         if balance <= 0:
