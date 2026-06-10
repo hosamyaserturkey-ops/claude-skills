@@ -34,10 +34,19 @@ challenge attempts — and auto-detects the starting balance and loss limits
 from the challenge definition where possible. If detection fails, pass
 `--balance 10000` (your challenge size).
 
+Instead of `export` lines you can copy `.env.example` to `.env` in the
+`challenge-guardian` folder and fill in your values — the bot reads it
+automatically. Never commit `.env`.
+
 ## Multiple accounts
 
-One guardian guards one account. If you have several active accounts, list
-them and run one guardian per account (one terminal window each):
+Guard everything at once with `--all` (one process, one monitor per account):
+
+```bash
+python -m guardian --all
+```
+
+Or pick one account per terminal window:
 
 ```bash
 python -m guardian --list-accounts
@@ -47,7 +56,36 @@ python -m guardian --preset 2step-1 --account 2   # in a second window
 
 `--account` takes the number from `--list-accounts` or any unique part of the
 account id. The bot warns at startup if it sees active accounts it isn't
-guarding.
+guarding. Note: `--all` applies the same `--preset` to every account (the
+loss limits are auto-detected per account where the API provides them).
+
+## Hosting it 24/7
+
+The bot only protects you while it's running, so for real use deploy it to a
+small always-on host. A `Dockerfile` is included; the container defaults to
+`python -m guardian --all`.
+
+**Railway / Render (no server admin needed):**
+1. Push this repo to GitHub (already done if you're reading this there).
+2. Create a new service from the repo; set the root directory to
+   `challenge-guardian` (both platforms auto-detect the Dockerfile).
+3. Add the environment variables from `.env.example` (`PROPR_API_KEY`,
+   `GUARDIAN_TELEGRAM_TOKEN`, `GUARDIAN_TELEGRAM_CHAT_ID`,
+   `GUARDIAN_DISCORD_WEBHOOK`, `GUARDIAN_ALL=true`, `GUARDIAN_PRESET=...`).
+4. Deploy. The logs show the same status lines as running locally.
+
+**Any VPS / Docker host:**
+
+```bash
+docker build -t challenge-guardian .
+docker run -d --restart unless-stopped --env-file .env \
+  -v guardian-state:/app/state challenge-guardian
+```
+
+Note on restarts: local floor state lives in `state/`. On hosts with an
+ephemeral filesystem the bot reconstructs the important part (the trailing
+peak) from Propr's server-side `highWaterMark`, but mount a volume for
+`/app/state` where you can.
 
 ## What it monitors
 

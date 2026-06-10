@@ -107,11 +107,14 @@ class ProprClient:
                 "No active challenge or funded account found on this Propr account. "
                 "Purchase a challenge at https://app.propr.xyz/dashboard first."
             )
-        chosen = _select_account(accounts, selector)
-        self.kind = chosen["kind"]
-        self.record = chosen["record"]
-        self.record_id = chosen["record_id"]
-        self.account_id = chosen["account_id"]
+        self.select(_select_account(accounts, selector))
+
+    def select(self, account: dict) -> None:
+        """Bind this client to one of the accounts from list_accounts()."""
+        self.kind = account["kind"]
+        self.record = account["record"]
+        self.record_id = account["record_id"]
+        self.account_id = account["account_id"]
 
     def fetch_snapshot(self) -> AccountSnapshot:
         if not self.account_id:
