@@ -107,6 +107,9 @@ For each poll it computes the exact breach floors and fires:
 - **BREACH** when equity touches a floor — or when Propr's own server marks
   the attempt `failed` (the server verdict always wins)
 - **PASSED** when the profit target is reached or Propr marks the challenge passed
+- a **trade notification** whenever a position opens or closes, with current
+  equity and the remaining headroom to today's loss floor (disable with
+  `--no-trade-alerts`)
 - a **watchdog alert** if the API becomes unreachable, so you know when you
   are flying blind
 

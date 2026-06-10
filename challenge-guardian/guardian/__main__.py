@@ -85,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account", default=os.environ.get("GUARDIAN_ACCOUNT"),
                    help="Which account to guard when you have several: a number "
                         "from --list-accounts (1, 2, ...) or part of the account id.")
+    p.add_argument("--no-trade-alerts", action="store_true",
+                   help="Don't send a notification when a position opens or closes.")
     p.add_argument("--all", action="store_true",
                    default=os.environ.get("GUARDIAN_ALL", "").lower() in ("1", "true", "yes"),
                    help="Propr mode only: guard every active account in one process "
@@ -154,6 +156,7 @@ def _propr_job(args: argparse.Namespace, account: dict, alerters: list):
         cfg, client, alerters, state_path,
         poll_interval=args.poll_interval,
         max_iterations=1 if args.once else None,
+        trade_alerts=not args.no_trade_alerts,
     )
 
 
@@ -215,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg, client, build_alerters(), _state_path(args, args.address.lower()),
             poll_interval=args.poll_interval,
             max_iterations=1 if args.once else None,
+            trade_alerts=not args.no_trade_alerts,
         )
 
     print("Provide a Propr API key (--api-key or env PROPR_API_KEY) — or, for "

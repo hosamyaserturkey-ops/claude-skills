@@ -59,6 +59,53 @@ def test_once_exits_nonzero_when_api_unreachable(tmp_path):
     assert code == 1
 
 
+def test_trade_open_close_alerts_fire_once(tmp_path):
+    cfg = make_preset("1step", 10_000.0)
+    capture = CaptureAlerter()
+    pos = {"positionId": "p1", "positionSide": "long", "quantity": "0.1",
+           "base": "BTC", "entryPrice": "60000"}
+
+    class SnapClient:
+        label = "stub"
+
+        def __init__(self):
+            self.snaps = [
+                AccountSnapshot(equity=10_000.0, open_positions=[]),
+                AccountSnapshot(equity=9_990.0, open_positions=[pos]),
+                AccountSnapshot(equity=9_985.0, open_positions=[pos]),  # unchanged
+                AccountSnapshot(equity=10_010.0, open_positions=[]),
+            ]
+
+        def fetch_snapshot(self):
+            return self.snaps.pop(0)
+
+    code = run_monitor(cfg, SnapClient(), [capture], tmp_path / "s.json",
+                       poll_interval=0, max_iterations=4)
+    assert code == 0
+    opened = [m for m in capture.messages if "Trade opened" in m]
+    closed = [m for m in capture.messages if "Trade closed" in m]
+    assert len(opened) == 1 and "LONG 0.1 BTC @ 60,000.00" in opened[0]
+    assert len(closed) == 1 and "p1" in closed[0]
+
+
+def test_trade_alerts_can_be_disabled(tmp_path):
+    cfg = make_preset("1step", 10_000.0)
+    capture = CaptureAlerter()
+    pos = {"positionId": "p1", "quantity": "0.1", "base": "BTC"}
+
+    class SnapClient:
+        label = "stub"
+        snaps = [AccountSnapshot(equity=10_000.0, open_positions=[]),
+                 AccountSnapshot(equity=9_990.0, open_positions=[pos])]
+
+        def fetch_snapshot(self):
+            return self.snaps.pop(0)
+
+    run_monitor(cfg, SnapClient(), [capture], tmp_path / "s.json",
+                poll_interval=0, max_iterations=2, trade_alerts=False)
+    assert not any("Trade" in m for m in capture.messages)
+
+
 def test_run_parallel_returns_worst_code_and_survives_crash():
     from guardian.monitor import run_parallel
 
