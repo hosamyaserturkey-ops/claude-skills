@@ -52,6 +52,7 @@ class ProprClient:
         self.record_id: str | None = None   # attemptId or issuanceId
         self.kind: str | None = None        # "funded" or "challenge"
         self.record: dict = {}
+        self.accounts: list[dict] = []      # all active accounts found by discover()
 
     @property
     def label(self) -> str:
@@ -75,27 +76,42 @@ class ProprClient:
             return payload.get("data", []) or []
         return payload or []
 
-    def discover(self) -> None:
-        """Find the tradeable account: funded accounts first, then active
-        challenge attempts (same order as Propr's own quickstart)."""
-        issuances = self._items(self._get("/book-account-issuances", params={"status": "active"}))
-        if issuances:
-            self.kind = "funded"
-            self.record = issuances[0]
-            self.record_id = _first(self.record, "issuanceId", "id")
-            self.account_id = self.record["accountId"]
-            return
-        attempts = self._items(self._get("/challenge-attempts", params={"status": "active"}))
-        if attempts:
-            self.kind = "challenge"
-            self.record = attempts[0]
-            self.record_id = _first(self.record, "attemptId", "id")
-            self.account_id = self.record["accountId"]
-            return
-        raise SystemExit(
-            "No active challenge or funded account found on this Propr account. "
-            "Purchase a challenge at https://app.propr.xyz/dashboard first."
-        )
+    def list_accounts(self) -> list[dict]:
+        """All active accounts on this user: funded first, then challenges."""
+        accounts = []
+        for item in self._items(self._get("/book-account-issuances", params={"status": "active"})):
+            accounts.append({
+                "kind": "funded",
+                "account_id": item["accountId"],
+                "record_id": _first(item, "issuanceId", "id"),
+                "record": item,
+            })
+        for item in self._items(self._get("/challenge-attempts", params={"status": "active"})):
+            accounts.append({
+                "kind": "challenge",
+                "account_id": item["accountId"],
+                "record_id": _first(item, "attemptId", "id"),
+                "record": item,
+            })
+        self.accounts = accounts
+        return accounts
+
+    def discover(self, selector: str | None = None) -> None:
+        """Pick the account to guard. With no selector, take the first active
+        account (funded before challenge, same order as Propr's quickstart).
+        A selector is either a 1-based number from --list-accounts or any
+        unique part of the accountId."""
+        accounts = self.list_accounts()
+        if not accounts:
+            raise SystemExit(
+                "No active challenge or funded account found on this Propr account. "
+                "Purchase a challenge at https://app.propr.xyz/dashboard first."
+            )
+        chosen = _select_account(accounts, selector)
+        self.kind = chosen["kind"]
+        self.record = chosen["record"]
+        self.record_id = chosen["record_id"]
+        self.account_id = chosen["account_id"]
 
     def fetch_snapshot(self) -> AccountSnapshot:
         if not self.account_id:
@@ -206,6 +222,36 @@ class ProprClient:
                 print(f"--- {name} ---\n{json.dumps(self._get(path), indent=2)[:3000]}", flush=True)
             except Exception as exc:
                 print(f"--- {name} --- ERROR: {exc}", flush=True)
+
+
+def format_accounts(accounts: list[dict]) -> str:
+    lines = []
+    for i, acc in enumerate(accounts, start=1):
+        status = acc["record"].get("status", "?")
+        lines.append(f"  {i}. [{acc['kind']}] {acc['account_id']} (status: {status})")
+    return "\n".join(lines)
+
+
+def _select_account(accounts: list[dict], selector: str | None) -> dict:
+    if selector is None:
+        return accounts[0]
+    selector = selector.strip()
+    if selector.isdigit():
+        n = int(selector)
+        if 1 <= n <= len(accounts):
+            return accounts[n - 1]
+        raise SystemExit(
+            f"--account {n} is out of range; there are {len(accounts)} active "
+            f"account(s):\n{format_accounts(accounts)}"
+        )
+    matches = [a for a in accounts if selector.lower() in a["account_id"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    problem = "matches no" if not matches else "matches more than one"
+    raise SystemExit(
+        f"--account '{selector}' {problem} active account. "
+        f"Active accounts:\n{format_accounts(accounts)}"
+    )
 
 
 def _first(d: dict, *keys: str) -> Any:

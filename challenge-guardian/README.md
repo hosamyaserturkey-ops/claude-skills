@@ -34,6 +34,21 @@ challenge attempts — and auto-detects the starting balance and loss limits
 from the challenge definition where possible. If detection fails, pass
 `--balance 10000` (your challenge size).
 
+## Multiple accounts
+
+One guardian guards one account. If you have several active accounts, list
+them and run one guardian per account (one terminal window each):
+
+```bash
+python -m guardian --list-accounts
+python -m guardian --preset 1step --account 1
+python -m guardian --preset 2step-1 --account 2   # in a second window
+```
+
+`--account` takes the number from `--list-accounts` or any unique part of the
+account id. The bot warns at startup if it sees active accounts it isn't
+guarding.
+
 ## What it monitors
 
 Rules from the [official Propr rulebook](https://www.propr.xyz/rules), built
@@ -75,6 +90,8 @@ only tighten, never loosen.
 --poll-interval 5          # seconds between checks (default 10)
 --once                     # single check, for cron
 --probe                    # dump raw Propr API responses for debugging
+--list-accounts            # show your active accounts and exit
+--account 2                # guard a specific account (number or id fragment)
 --address 0x...            # alternative mode: watch a wallet directly on
                            # Hyperliquid's public API instead of Propr
 ```
