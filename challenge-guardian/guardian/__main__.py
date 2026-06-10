@@ -21,6 +21,8 @@ from .config import ChallengeConfig, make_preset
 from .hyperliquid import MAINNET_URL, TESTNET_URL, HyperliquidInfoClient
 from .monitor import run_monitor, run_parallel
 from .propr import DEFAULT_URL as PROPR_URL, ProprClient, format_accounts
+from .status import StatusBoard
+from .telegram_commands import TelegramCommandListener
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -87,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "from --list-accounts (1, 2, ...) or part of the account id.")
     p.add_argument("--no-trade-alerts", action="store_true",
                    help="Don't send a notification when a position opens or closes.")
+    p.add_argument("--no-telegram-commands", action="store_true",
+                   default=os.environ.get("GUARDIAN_TELEGRAM_COMMANDS", "").lower()
+                   in ("0", "false", "off", "no"),
+                   help="Don't listen for /status etc. on Telegram (or env "
+                        "GUARDIAN_TELEGRAM_COMMANDS=off). Only one running instance "
+                        "may listen per bot token.")
     p.add_argument("--all", action="store_true",
                    default=os.environ.get("GUARDIAN_ALL", "").lower() in ("1", "true", "yes"),
                    help="Propr mode only: guard every active account in one process "
@@ -138,7 +146,20 @@ def _state_path(args: argparse.Namespace, key: str) -> Path:
     return Path("state") / f"{re.sub(r'[^A-Za-z0-9._-]', '_', key)}.json"
 
 
-def _propr_job(args: argparse.Namespace, account: dict, alerters: list):
+def _start_telegram_commands(args: argparse.Namespace) -> StatusBoard | None:
+    """Start the /status listener when Telegram is configured. Returns the
+    board monitors should publish to, or None when commands are disabled."""
+    token = os.environ.get("GUARDIAN_TELEGRAM_TOKEN")
+    chat_id = os.environ.get("GUARDIAN_TELEGRAM_CHAT_ID")
+    if args.no_telegram_commands or args.once or not (token and chat_id):
+        return None
+    board = StatusBoard()
+    TelegramCommandListener(token, chat_id, board).start()
+    return board
+
+
+def _propr_job(args: argparse.Namespace, account: dict, alerters: list,
+               status_board: StatusBoard | None = None):
     """Build a no-arg monitor job for one Propr account."""
     client = ProprClient(args.api_key, base_url=args.propr_url,
                          builder_id=args.builder_id)
@@ -157,6 +178,7 @@ def _propr_job(args: argparse.Namespace, account: dict, alerters: list):
         poll_interval=args.poll_interval,
         max_iterations=1 if args.once else None,
         trade_alerts=not args.no_trade_alerts,
+        status_board=status_board,
     )
 
 
@@ -185,10 +207,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         alerters = build_alerters()
+        board = _start_telegram_commands(args)
         if args.all:
             print(f"Guarding all {len(accounts)} active account(s):\n"
                   f"{format_accounts(accounts)}", flush=True)
-            jobs = [_propr_job(args, acc, alerters) for acc in accounts]
+            jobs = [_propr_job(args, acc, alerters, board) for acc in accounts]
             return run_parallel(jobs)
 
         client.discover(args.account)
@@ -201,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         job = _propr_job(args, {
             "kind": client.kind, "account_id": client.account_id,
             "record_id": client.record_id, "record": client.record,
-        }, alerters)
+        }, alerters, board)
         return job()
 
     if args.address:
@@ -219,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval=args.poll_interval,
             max_iterations=1 if args.once else None,
             trade_alerts=not args.no_trade_alerts,
+            status_board=_start_telegram_commands(args),
         )
 
     print("Provide a Propr API key (--api-key or env PROPR_API_KEY) — or, for "
