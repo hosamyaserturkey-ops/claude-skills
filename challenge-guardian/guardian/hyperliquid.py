@@ -1,25 +1,19 @@
 """Minimal read-only client for the public Hyperliquid Info API.
 
-Propr runs on Hyperliquid, so a trader's challenge account equity (including
-floating PnL) is readable for any wallet address with no authentication:
+Useful for accounts that trade directly on Hyperliquid under their own wallet
+address. Propr challenge accounts are internal to Propr — use guardian.propr
+for those. Docs:
 https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import requests
+
+from .snapshot import AccountSnapshot
 
 MAINNET_URL = "https://api.hyperliquid.xyz/info"
 TESTNET_URL = "https://api.hyperliquid-testnet.xyz/info"
-
-
-@dataclass
-class AccountSnapshot:
-    equity: float                 # accountValue: margin balance incl. unrealized PnL
-    withdrawable: float
-    open_positions: list[dict]    # raw assetPosition entries
 
 
 class HyperliquidInfoClient:
@@ -30,6 +24,10 @@ class HyperliquidInfoClient:
         self.base_url = base_url
         self.timeout = timeout
         self.session = requests.Session()
+
+    @property
+    def label(self) -> str:
+        return f"{self.address[:6]}…{self.address[-4:]}"
 
     def fetch_snapshot(self) -> AccountSnapshot:
         resp = self.session.post(
