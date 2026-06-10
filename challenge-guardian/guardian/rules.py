@@ -41,6 +41,8 @@ class TrackerState:
     alerted: dict[str, float] = field(default_factory=dict)
     breached: bool = False
     passed: bool = False
+    # Position keys seen on the last poll, for trade open/close notifications.
+    open_position_ids: list[str] = field(default_factory=list)
 
 
 def _utc_day_key(now: datetime) -> str:

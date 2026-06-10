@@ -10,7 +10,7 @@ import requests
 
 from .alerts import dispatch
 from .config import ChallengeConfig
-from .rules import BREACH, PASSED, RuleEvent, daily_loss_floor, drawdown_floor, evaluate
+from .rules import BREACH, INFO, PASSED, RuleEvent, daily_loss_floor, drawdown_floor, evaluate
 from .state import load_state, save_state
 
 
@@ -22,6 +22,7 @@ def run_monitor(
     poll_interval: float = 10.0,
     status_every: int = 60,
     max_iterations: int | None = None,
+    trade_alerts: bool = True,
 ) -> int:
     """Run the monitoring loop. Returns an exit code (0 = passed/stopped, 2 = breached)."""
     state = load_state(state_path)
@@ -61,6 +62,7 @@ def run_monitor(
             state.peak_equity = max(state.peak_equity, snapshot.high_water_mark)
 
         events = evaluate(cfg, state, snapshot.equity)
+        events.extend(_position_events(cfg, state, snapshot, trade_alerts))
         events.extend(_server_verdict(snapshot, state))
         for event in events:
             dispatch(alerters, event, label)
@@ -83,6 +85,54 @@ def run_monitor(
         if max_iterations is not None and iteration >= max_iterations:
             return 0
         time.sleep(poll_interval)
+
+
+def _position_events(cfg, state, snapshot, trade_alerts: bool) -> list[RuleEvent]:
+    """Notify when a position appears or disappears between polls."""
+    current = {_position_key(p, i): p for i, p in enumerate(snapshot.open_positions)}
+    previous = set(state.open_position_ids)
+    state.open_position_ids = list(current)
+    if not trade_alerts or not previous and not current:
+        return []
+
+    headroom = snapshot.equity - daily_loss_floor(cfg, state)
+    suffix = (f"Equity ${snapshot.equity:,.2f}, "
+              f"${headroom:,.2f} above today's loss floor.")
+    events = []
+    for key, p in current.items():
+        if key not in previous:
+            events.append(RuleEvent(
+                severity=INFO, rule="position",
+                message=f"📈 Trade opened: {_describe_position(p)}. {suffix}",
+                equity=snapshot.equity, limit=0.0, headroom=headroom,
+            ))
+    for key in previous - set(current):
+        events.append(RuleEvent(
+            severity=INFO, rule="position",
+            message=f"📉 Trade closed ({key}). {suffix}",
+            equity=snapshot.equity, limit=0.0, headroom=headroom,
+        ))
+    return events
+
+
+def _position_key(p: dict, index: int) -> str:
+    # Propr positions carry positionId; Hyperliquid wallet mode nests a coin.
+    return str(
+        p.get("positionId")
+        or (p.get("position") or {}).get("coin")
+        or f"position-{index}"
+    )
+
+
+def _describe_position(p: dict) -> str:
+    side = (p.get("positionSide") or "").upper()
+    qty = p.get("quantity") or (p.get("position") or {}).get("szi") or "?"
+    base = p.get("base") or (p.get("position") or {}).get("coin") or ""
+    entry = p.get("entryPrice")
+    desc = " ".join(s for s in (side, str(qty), base) if s) or "position"
+    if entry:
+        desc += f" @ {float(entry):,.2f}"
+    return desc
 
 
 def _server_verdict(snapshot, state) -> list[RuleEvent]:
