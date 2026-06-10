@@ -23,17 +23,28 @@ from .status import StatusBoard
 HELP_TEXT = (
     "Challenge Guardian commands:\n"
     "/status — live equity, breach floors, and open positions per account\n"
-    "/help — this message\n\n"
-    "I'm read-only: I watch and warn, I never trade."
+    "/help — this message"
+)
+
+ACTIONS_HELP = (
+    "\n/close <ASSET> — close that asset's position(s) on every account (e.g. /close BTC)\n"
+    "/flatten — close ALL open positions on every account"
+)
+
+ACTIONS_DISABLED = (
+    "Actions are disabled — I'm running read-only. Start the bot with "
+    "--enable-actions (or GUARDIAN_ACTIONS=on) to allow /close and /flatten."
 )
 
 
 class TelegramCommandListener(threading.Thread):
-    def __init__(self, token: str, chat_id: str, board: StatusBoard, timeout: float = 35.0):
+    def __init__(self, token: str, chat_id: str, board: StatusBoard,
+                 action_clients: dict | None = None, timeout: float = 35.0):
         super().__init__(daemon=True, name="telegram-commands")
         self.api = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
         self.board = board
+        self.action_clients = action_clients  # {label: ProprClient} or None
         self.timeout = timeout
         self._offset: int | None = None
 
@@ -47,10 +58,44 @@ class TelegramCommandListener(threading.Thread):
         if text.startswith("/status"):
             return self.board.render()
         if text.startswith("/start") or text.startswith("/help"):
-            return HELP_TEXT
+            help_text = HELP_TEXT + (ACTIONS_HELP if self.action_clients else "")
+            footer = ("\n\nActions are ENABLED — /close and /flatten place real "
+                      "reduce-only orders." if self.action_clients
+                      else "\n\nI'm read-only: I watch and warn, I never trade.")
+            return help_text + footer
+        if text.startswith("/flatten"):
+            return self._run_action(base=None)
+        if text.startswith("/close"):
+            parts = text.split()
+            if len(parts) < 2:
+                return "Usage: /close <ASSET>, e.g. /close BTC"
+            return self._run_action(base=parts[1].upper())
         if text.startswith("/"):
             return f"Unknown command {text.split()[0]}. Try /help."
         return None
+
+    def _run_action(self, base: str | None) -> str:
+        if not self.action_clients:
+            return ACTIONS_DISABLED
+        what = f"{base} position(s)" if base else "ALL positions"
+        lines = [f"Closing {what}…"]
+        closed_any = False
+        for label, client in self.action_clients.items():
+            try:
+                results = client.flatten_positions(base=base)
+            except Exception as exc:
+                lines.append(f"{label}: FAILED — {exc}")
+                continue
+            if not results:
+                lines.append(f"{label}: nothing to close")
+                continue
+            closed_any = True
+            for r in results:
+                mark = "✅" if r["ok"] else "❌"
+                lines.append(f"{label}: {mark} {r['position']} → {r['detail']}")
+        if not closed_any and base:
+            lines.append(f"No open {base} positions found on any account.")
+        return "\n".join(lines)
 
     def run(self) -> None:
         print("Telegram commands enabled: send /status to the bot.", flush=True)

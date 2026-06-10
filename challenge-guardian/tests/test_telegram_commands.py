@@ -34,9 +34,51 @@ def test_help_and_unknown_commands():
     listener = make_listener()
     assert "/status" in listener.handle_update(update(12345, "/help"))
     assert "/status" in listener.handle_update(update(12345, "/start"))
-    assert "Unknown command" in listener.handle_update(update(12345, "/flatten"))
+    assert "Unknown command" in listener.handle_update(update(12345, "/banana"))
     # Plain chatter (no slash) gets no reply.
     assert listener.handle_update(update(12345, "hello bot")) is None
+
+
+def test_actions_disabled_by_default():
+    listener = make_listener()
+    assert "disabled" in listener.handle_update(update(12345, "/flatten"))
+    assert "disabled" in listener.handle_update(update(12345, "/close btc"))
+    assert "never trade" in listener.handle_update(update(12345, "/help"))
+
+
+def test_actions_enabled_close_and_flatten():
+    class FakeActionClient:
+        def __init__(self):
+            self.calls = []
+
+        def flatten_positions(self, base=None):
+            self.calls.append(base)
+            if base == "DOGE":
+                return []
+            return [{"position": "LONG 0.5 BTC", "ok": True, "detail": "filled"}]
+
+    client = FakeActionClient()
+    listener = TelegramCommandListener("tok", "12345", StatusBoard(),
+                                       action_clients={"acct1": client})
+    reply = listener.handle_update(update(12345, "/close btc"))
+    assert client.calls == ["BTC"]
+    assert "✅ LONG 0.5 BTC" in reply
+
+    reply = listener.handle_update(update(12345, "/flatten"))
+    assert client.calls == ["BTC", None]
+    assert "ALL positions" in reply
+
+    reply = listener.handle_update(update(12345, "/close doge"))
+    assert "No open DOGE positions" in reply
+
+    assert "Usage: /close" in listener.handle_update(update(12345, "/close"))
+    assert "/flatten" in listener.handle_update(update(12345, "/help"))
+
+
+def test_actions_ignored_from_other_chats():
+    listener = TelegramCommandListener("tok", "12345", StatusBoard(),
+                                       action_clients={"acct1": object()})
+    assert listener.handle_update(update(99999, "/flatten")) is None
 
 
 def test_other_chats_are_ignored_silently():
