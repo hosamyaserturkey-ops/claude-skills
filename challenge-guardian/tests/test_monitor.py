@@ -59,6 +59,39 @@ def test_once_exits_nonzero_when_api_unreachable(tmp_path):
     assert code == 1
 
 
+def test_run_parallel_returns_worst_code_and_survives_crash():
+    from guardian.monitor import run_parallel
+
+    def ok():
+        return 0
+
+    def breached():
+        return 2
+
+    def crashes():
+        raise RuntimeError("boom")
+
+    assert run_parallel([ok, ok]) == 0
+    assert run_parallel([ok, breached]) == 2
+    assert run_parallel([ok, crashes]) == 1
+    assert run_parallel([]) == 0
+
+
+def test_dotenv_loads_without_overriding(tmp_path, monkeypatch):
+    from guardian.__main__ import load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        '# comment\nPROPR_API_KEY="pk_test_fromfile"\nGUARDIAN_PRESET=2step-1\n\nBADLINE\n'
+    )
+    monkeypatch.setenv("GUARDIAN_PRESET", "funded")  # real env wins
+    monkeypatch.delenv("PROPR_API_KEY", raising=False)
+    load_dotenv(env_file)
+    import os
+    assert os.environ["PROPR_API_KEY"] == "pk_test_fromfile"
+    assert os.environ["GUARDIAN_PRESET"] == "funded"
+
+
 def test_state_survives_restart_and_keeps_trailing_peak(tmp_path):
     cfg = make_preset("2step-1", 10_000.0)
     state_path = tmp_path / "state.json"

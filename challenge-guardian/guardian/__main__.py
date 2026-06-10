@@ -1,8 +1,9 @@
 """CLI entry point.
 
-Propr mode (recommended):   python -m guardian --preset 1step
-                            (reads PROPR_API_KEY from the environment;
-                            balance is auto-detected when possible)
+Propr mode (recommended):   python -m guardian --all
+                            (reads PROPR_API_KEY from the environment or a
+                            .env file; guards every active account)
+Single account:             python -m guardian --preset 1step --account 2
 Hyperliquid wallet mode:    python -m guardian --address 0x... --balance 10000
 """
 
@@ -18,14 +19,26 @@ from pathlib import Path
 from .alerts import ConsoleAlerter, DiscordAlerter, TelegramAlerter
 from .config import ChallengeConfig, make_preset
 from .hyperliquid import MAINNET_URL, TESTNET_URL, HyperliquidInfoClient
-from .monitor import run_monitor
+from .monitor import run_monitor, run_parallel
 from .propr import DEFAULT_URL as PROPR_URL, ProprClient, format_accounts
+
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    """Load KEY=VALUE lines from a .env file without overriding real env vars."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="guardian",
-        description="Monitor a Propr challenge account and alert before "
+        description="Monitor Propr challenge accounts and alert before "
                     "daily-loss or drawdown breaches.",
     )
     p.add_argument("--api-key", default=os.environ.get("PROPR_API_KEY"),
@@ -71,8 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Propr mode only: list your active accounts and exit.")
     p.add_argument("--account", default=os.environ.get("GUARDIAN_ACCOUNT"),
                    help="Which account to guard when you have several: a number "
-                        "from --list-accounts (1, 2, ...) or part of the account id. "
-                        "Run one guardian per account, each with its own --account.")
+                        "from --list-accounts (1, 2, ...) or part of the account id.")
+    p.add_argument("--all", action="store_true",
+                   default=os.environ.get("GUARDIAN_ALL", "").lower() in ("1", "true", "yes"),
+                   help="Propr mode only: guard every active account in one process "
+                        "(or env GUARDIAN_ALL=true). Ideal for hosted deployments.")
     return p
 
 
@@ -114,40 +130,78 @@ def build_alerters() -> list:
     return alerters
 
 
+def _state_path(args: argparse.Namespace, key: str) -> Path:
+    if args.state_file:
+        return Path(args.state_file)
+    return Path("state") / f"{re.sub(r'[^A-Za-z0-9._-]', '_', key)}.json"
+
+
+def _propr_job(args: argparse.Namespace, account: dict, alerters: list):
+    """Build a no-arg monitor job for one Propr account."""
+    client = ProprClient(args.api_key, base_url=args.propr_url,
+                         builder_id=args.builder_id)
+    client.select(account)
+    detected = client.detect_challenge_config()
+    balance = args.balance or detected.get("starting_balance", 0)
+    if balance <= 0:
+        raise SystemExit(
+            f"Could not auto-detect the starting balance for {client.account_id} — "
+            "pass it with --balance, e.g. --balance 10000."
+        )
+    cfg = build_config(args, balance, detected)
+    state_path = _state_path(args, client.account_id)
+    return lambda: run_monitor(
+        cfg, client, alerters, state_path,
+        poll_interval=args.poll_interval,
+        max_iterations=1 if args.once else None,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     args = build_parser().parse_args(argv)
 
-    detected: dict = {}
     if args.api_key:
         client = ProprClient(args.api_key, base_url=args.propr_url,
                              builder_id=args.builder_id)
         if args.probe:
             client.probe()
             return 0
+        accounts = client.list_accounts()
         if args.list_accounts:
-            accounts = client.list_accounts()
             if not accounts:
                 print("No active accounts found.", flush=True)
             else:
                 print(f"Active accounts ({len(accounts)}):\n{format_accounts(accounts)}\n"
-                      "Guard one with: python -m guardian --account <number>", flush=True)
+                      "Guard one with --account <number>, or all with --all.", flush=True)
             return 0
+        if not accounts:
+            print("No active challenge or funded account found on this Propr "
+                  "account. Purchase a challenge at https://app.propr.xyz/dashboard "
+                  "first.", file=sys.stderr)
+            return 1
+
+        alerters = build_alerters()
+        if args.all:
+            print(f"Guarding all {len(accounts)} active account(s):\n"
+                  f"{format_accounts(accounts)}", flush=True)
+            jobs = [_propr_job(args, acc, alerters) for acc in accounts]
+            return run_parallel(jobs)
+
         client.discover(args.account)
         print(f"Found {client.kind} account: {client.account_id}", flush=True)
-        if len(client.accounts) > 1 and not args.account:
-            others = len(client.accounts) - 1
-            print(f"⚠️  You have {others} other active account(s) NOT being guarded:\n"
-                  f"{format_accounts(client.accounts)}\n"
-                  "Open another window and run the guardian with --account <number> "
-                  "for each one.", flush=True)
-        detected = client.detect_challenge_config()
-        balance = args.balance or detected.get("starting_balance", 0)
-        if balance <= 0:
-            print("Could not auto-detect the starting balance — pass it with "
-                  "--balance, e.g. --balance 10000.", file=sys.stderr)
-            return 1
-        state_key = re.sub(r"[^A-Za-z0-9._-]", "_", client.account_id)
-    elif args.address:
+        if len(accounts) > 1 and not args.account:
+            print(f"⚠️  You have {len(accounts) - 1} other active account(s) NOT "
+                  f"being guarded:\n{format_accounts(accounts)}\n"
+                  "Use --all to guard everything, or --account <number> per window.",
+                  flush=True)
+        job = _propr_job(args, {
+            "kind": client.kind, "account_id": client.account_id,
+            "record_id": client.record_id, "record": client.record,
+        }, alerters)
+        return job()
+
+    if args.address:
         if args.balance <= 0:
             print("--balance (or GUARDIAN_BALANCE) must be a positive starting "
                   "balance in wallet mode.", file=sys.stderr)
@@ -156,24 +210,17 @@ def main(argv: list[str] | None = None) -> int:
             args.address,
             base_url=TESTNET_URL if args.testnet else MAINNET_URL,
         )
-        balance = args.balance
-        state_key = args.address.lower()
-    else:
-        print("Provide a Propr API key (--api-key or env PROPR_API_KEY) — or, for "
-              "accounts trading directly on Hyperliquid, a wallet --address.",
-              file=sys.stderr)
-        return 1
+        cfg = build_config(args, args.balance, {})
+        return run_monitor(
+            cfg, client, build_alerters(), _state_path(args, args.address.lower()),
+            poll_interval=args.poll_interval,
+            max_iterations=1 if args.once else None,
+        )
 
-    cfg = build_config(args, balance, detected)
-    state_path = Path(args.state_file) if args.state_file else Path("state") / f"{state_key}.json"
-    return run_monitor(
-        cfg,
-        client,
-        build_alerters(),
-        state_path,
-        poll_interval=args.poll_interval,
-        max_iterations=1 if args.once else None,
-    )
+    print("Provide a Propr API key (--api-key or env PROPR_API_KEY) — or, for "
+          "accounts trading directly on Hyperliquid, a wallet --address.",
+          file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

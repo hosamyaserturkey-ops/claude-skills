@@ -121,3 +121,28 @@ def _terminal(status: str) -> str | None:
 def dispatch_all(alerters: list, label: str, text: str) -> None:
     for alerter in alerters:
         alerter.send(f"{label} — {text}")
+
+
+def run_parallel(jobs: list) -> int:
+    """Run several monitor jobs (no-arg callables returning an exit code)
+    concurrently, one thread each. Returns the worst exit code."""
+    import threading
+
+    codes: dict[int, int] = {}
+
+    def runner(index: int, job) -> None:
+        try:
+            codes[index] = job()
+        except Exception as exc:  # one account failing must not kill the rest
+            print(f"Monitor {index} crashed: {exc}", file=sys.stderr, flush=True)
+            codes[index] = 1
+
+    threads = [
+        threading.Thread(target=runner, args=(i, job), daemon=True)
+        for i, job in enumerate(jobs)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return max(codes.values(), default=0)
