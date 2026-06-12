@@ -1,7 +1,7 @@
-"""Read-only client for the Propr API (https://www.propr.xyz/developers).
+"""Read-only-by-default client for the Propr API (https://www.propr.xyz/developers).
 
 Auth is an API key in the X-API-Key header (one key per user, generated at
-app.propr.xyz/settings). Endpoints used — all reads, no order placement:
+app.propr.xyz/settings). Reads:
 
   GET /users/me                          sanity-check the key
   GET /book-account-issuances            funded accounts (checked first)
@@ -10,7 +10,14 @@ app.propr.xyz/settings). Endpoints used — all reads, no order placement:
   GET /book-account-issuances/{id}       issuance status + closureReason
   GET /accounts/{accountId}              balance / unrealized PnL / high-water mark
   GET /accounts/{accountId}/positions    open positions
+  GET /accounts/{accountId}/trades       execution history (daily digest)
   GET /challenges                        challenge config (balance, loss limits)
+
+Writes — used ONLY by the opt-in action features (/close, /flatten,
+auto-flatten); never called otherwise:
+
+  POST /accounts/{accountId}/orders      reduce-only market orders that close
+                                         existing positions
 
 Equity formula per the official SDK docs:
   equity = balance + totalUnrealizedPnl + isolatedPositionMargin
@@ -19,6 +26,8 @@ Equity formula per the official SDK docs:
 from __future__ import annotations
 
 import json
+import os
+import time
 from typing import Any
 
 import requests
@@ -26,6 +35,7 @@ import requests
 from .snapshot import AccountSnapshot
 
 DEFAULT_URL = "https://api.propr.xyz/v1"
+DEFAULT_WS_URL = "wss://api.propr.xyz/ws"
 
 # Statuses that mean the account's story is over, as reported by Propr itself.
 _FAILED_STATUSES = {"failed", "closed"}
@@ -116,6 +126,17 @@ class ProprClient:
         self.record_id = account["record_id"]
         self.account_id = account["account_id"]
 
+    def fetch_open_positions(self) -> list[dict]:
+        positions = self._items(
+            self._get(f"/accounts/{self.account_id}/positions", params={"status": "open"})
+        )
+        return [p for p in positions if float(p.get("quantity") or 0) != 0]
+
+    def fetch_trades(self, limit: int = 100) -> list[dict]:
+        return self._items(
+            self._get(f"/accounts/{self.account_id}/trades", params={"limit": limit})
+        )
+
     def fetch_snapshot(self) -> AccountSnapshot:
         if not self.account_id:
             self.discover()
@@ -129,10 +150,7 @@ class ProprClient:
         equity = balance + unrealized + isolated
         hwm = account.get("highWaterMark")
 
-        positions = self._items(
-            self._get(f"/accounts/{self.account_id}/positions", params={"status": "open"})
-        )
-        positions = [p for p in positions if float(p.get("quantity") or 0) != 0]
+        positions = self.fetch_open_positions()
 
         status, reason = self._lifecycle()
         return AccountSnapshot(
@@ -163,6 +181,55 @@ class ProprClient:
         status = record.get("status")
         reason = _first(record, "failureReason", "closureReason")
         return status, reason
+
+    def _post(self, path: str, payload: dict) -> Any:
+        resp = self.session.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout)
+        if resp.status_code not in (200, 201):  # Propr returns 201 on create
+            raise RuntimeError(f"POST {path} failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
+
+    def close_position(self, position: dict) -> dict:
+        """Close one position with a reduce-only IOC market order.
+
+        Per the Propr docs: reduceOnly prevents accidentally opening an
+        opposing position, closePosition closes the full size, and IOC stops
+        the market order from resting on the book."""
+        side = "sell" if (position.get("positionSide") or "").lower() == "long" else "buy"
+        order = {
+            "accountId": self.account_id,
+            "intentId": new_ulid(),
+            "exchange": position.get("exchange", "hyperliquid"),
+            "type": "market",
+            "side": side,
+            "positionSide": position.get("positionSide"),
+            "productType": position.get("productType", "perp"),
+            "timeInForce": "IOC",
+            "asset": position.get("asset") or position.get("base"),
+            "base": position.get("base"),
+            "quote": position.get("quote", "USDC"),
+            "quantity": str(position.get("quantity")),
+            "reduceOnly": True,
+            "closePosition": True,
+        }
+        result = self._post(f"/accounts/{self.account_id}/orders", {"orders": [order]})
+        return (self._items(result) or [result])[0]
+
+    def flatten_positions(self, base: str | None = None) -> list[dict]:
+        """Close all open positions (optionally only for one asset).
+        Returns one result dict per position: {'position', 'ok', 'detail'}."""
+        results = []
+        for position in self.fetch_open_positions():
+            if base and (position.get("base") or "").upper() != base.upper():
+                continue
+            desc = (f"{(position.get('positionSide') or '?').upper()} "
+                    f"{position.get('quantity')} {position.get('base')}")
+            try:
+                order = self.close_position(position)
+                results.append({"position": desc, "ok": True,
+                                "detail": order.get("status", "submitted")})
+            except Exception as exc:  # keep closing the rest even if one fails
+                results.append({"position": desc, "ok": False, "detail": str(exc)})
+        return results
 
     @staticmethod
     def is_terminal(status: str) -> str | None:
@@ -255,6 +322,16 @@ def _select_account(accounts: list[dict], selector: str | None) -> dict:
         f"--account '{selector}' {problem} active account. "
         f"Active accounts:\n{format_accounts(accounts)}"
     )
+
+
+_CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def new_ulid() -> str:
+    """26-char ULID (48-bit ms timestamp + 80 random bits, Crockford base32).
+    Propr uses the intentId for idempotency: a unique one per order."""
+    value = (int(time.time() * 1000) << 80) | int.from_bytes(os.urandom(10), "big")
+    return "".join(_CROCKFORD32[(value >> (5 * i)) & 31] for i in range(25, -1, -1))
 
 
 def _first(d: dict, *keys: str) -> Any:

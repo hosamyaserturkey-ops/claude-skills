@@ -43,6 +43,8 @@ class TrackerState:
     passed: bool = False
     # Position keys seen on the last poll, for trade open/close notifications.
     open_position_ids: list[str] = field(default_factory=list)
+    # UTC date the last daily digest was sent, so restarts don't resend it.
+    last_digest_day: str = ""
 
 
 def _utc_day_key(now: datetime) -> str:
@@ -178,6 +180,19 @@ def _check_floor(
         headroom=headroom,
     ))
     return events
+
+
+def budget_consumed(cfg: ChallengeConfig, state: TrackerState, equity: float) -> dict[str, float]:
+    """Fraction of each rule's loss budget consumed at this equity (0..1+)."""
+    out: dict[str, float] = {}
+    for rule, floor in (
+        ("daily_loss", daily_loss_floor(cfg, state)),
+        ("drawdown", drawdown_floor(cfg, state)),
+    ):
+        anchor = state.day_start_equity if rule == "daily_loss" else _dd_anchor(cfg, state)
+        budget = anchor - floor
+        out[rule] = (anchor - equity) / budget if budget > 0 else 0.0
+    return out
 
 
 def _dd_anchor(cfg: ChallengeConfig, state: TrackerState) -> float:

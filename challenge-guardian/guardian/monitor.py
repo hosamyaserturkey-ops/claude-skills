@@ -8,9 +8,21 @@ from pathlib import Path
 
 import requests
 
+from datetime import datetime, timezone
+
 from .alerts import dispatch
 from .config import ChallengeConfig
-from .rules import BREACH, INFO, PASSED, RuleEvent, daily_loss_floor, drawdown_floor, evaluate
+from .digest import build_digest
+from .rules import (
+    BREACH,
+    INFO,
+    PASSED,
+    RuleEvent,
+    budget_consumed,
+    daily_loss_floor,
+    drawdown_floor,
+    evaluate,
+)
 from .state import load_state, save_state
 
 
@@ -24,6 +36,9 @@ def run_monitor(
     max_iterations: int | None = None,
     trade_alerts: bool = True,
     status_board=None,
+    auto_flatten_at: float | None = None,
+    digest_hour: int | None = None,
+    nudge=None,
 ) -> int:
     """Run the monitoring loop. Returns an exit code (0 = passed/stopped, 2 = breached)."""
     state = load_state(state_path)
@@ -36,9 +51,12 @@ def run_monitor(
     if state.breached:
         print("State file says this account already breached. Nothing to guard.", flush=True)
         return 2
+    if auto_flatten_at:
+        print(f"Auto-flatten armed at {auto_flatten_at:.0%} of a loss budget.", flush=True)
 
     consecutive_failures = 0
     iteration = 0
+    last_flatten_attempt = 0.0
     while True:
         iteration += 1
         try:
@@ -67,6 +85,18 @@ def run_monitor(
         events.extend(_server_verdict(snapshot, state))
         for event in events:
             dispatch(alerters, event, label)
+
+        # Auto-flatten: when armed, close everything as the last line of
+        # defense before a breach. Local floors fire BEFORE Propr's engine
+        # does, so acting here can still save the account.
+        if (auto_flatten_at and not state.breached and snapshot.open_positions
+                and hasattr(client, "flatten_positions")):
+            worst = max(budget_consumed(cfg, state, snapshot.equity).values())
+            if worst >= auto_flatten_at and time.time() - last_flatten_attempt >= 60:
+                last_flatten_attempt = time.time()
+                _auto_flatten(client, alerters, label, worst)
+
+        _maybe_send_digest(cfg, state, snapshot, client, alerters, label, digest_hour)
         save_state(state_path, state)
 
         if status_board is not None:
@@ -95,7 +125,47 @@ def run_monitor(
             return 0
         if max_iterations is not None and iteration >= max_iterations:
             return 0
-        time.sleep(poll_interval)
+        if nudge is not None:
+            # Sleep until the poll interval elapses OR the WebSocket reports
+            # account activity — whichever comes first.
+            nudge.wait(poll_interval)
+            nudge.clear()
+        else:
+            time.sleep(poll_interval)
+
+
+def _auto_flatten(client, alerters: list, label: str, worst: float) -> None:
+    try:
+        results = client.flatten_positions()
+    except Exception as exc:
+        dispatch_all(alerters, label,
+                     f"🛑 AUTO-FLATTEN FAILED at {worst:.0%} of a loss budget: {exc}. "
+                     "Close your positions manually NOW.")
+        return
+    ok = sum(1 for r in results if r["ok"])
+    detail = "; ".join(f"{r['position']}: {r['detail']}" for r in results)
+    text = (f"🛡️ AUTO-FLATTEN: {worst:.0%} of a loss budget used — "
+            f"closed {ok}/{len(results)} position(s). {detail}")
+    if ok < len(results):
+        text += " — some closes FAILED, check the account immediately."
+    dispatch_all(alerters, label, text)
+
+
+def _maybe_send_digest(cfg, state, snapshot, client, alerters, label, digest_hour) -> None:
+    if digest_hour is None or not hasattr(client, "fetch_trades"):
+        return
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    if now.hour < digest_hour or state.last_digest_day == today:
+        return
+    state.last_digest_day = today
+    try:
+        text = build_digest(client.fetch_trades(), cfg, state, snapshot.equity,
+                            len(snapshot.open_positions), now)
+    except Exception as exc:
+        print(f"Digest failed: {exc}", file=sys.stderr, flush=True)
+        return
+    dispatch_all(alerters, label, text)
 
 
 def _position_events(cfg, state, snapshot, trade_alerts: bool) -> list[RuleEvent]:

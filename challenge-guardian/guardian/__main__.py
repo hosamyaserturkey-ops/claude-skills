@@ -13,6 +13,7 @@ import argparse
 import os
 import re
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,9 +21,15 @@ from .alerts import ConsoleAlerter, DiscordAlerter, TelegramAlerter
 from .config import ChallengeConfig, make_preset
 from .hyperliquid import MAINNET_URL, TESTNET_URL, HyperliquidInfoClient
 from .monitor import run_monitor, run_parallel
-from .propr import DEFAULT_URL as PROPR_URL, ProprClient, format_accounts
+from .propr import (
+    DEFAULT_URL as PROPR_URL,
+    DEFAULT_WS_URL as PROPR_WS_URL,
+    ProprClient,
+    format_accounts,
+)
 from .status import StatusBoard
 from .telegram_commands import TelegramCommandListener
+from .ws import WebSocketNudger
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -99,6 +106,27 @@ def build_parser() -> argparse.ArgumentParser:
                    default=os.environ.get("GUARDIAN_ALL", "").lower() in ("1", "true", "yes"),
                    help="Propr mode only: guard every active account in one process "
                         "(or env GUARDIAN_ALL=true). Ideal for hosted deployments.")
+    p.add_argument("--enable-actions", action="store_true",
+                   default=os.environ.get("GUARDIAN_ACTIONS", "").lower()
+                   in ("1", "true", "on", "yes"),
+                   help="Allow trading actions: Telegram /close and /flatten, and "
+                        "--auto-flatten-at (or env GUARDIAN_ACTIONS=on). "
+                        "Off by default — the bot is read-only without it.")
+    p.add_argument("--auto-flatten-at", type=float,
+                   default=float(os.environ.get("GUARDIAN_AUTO_FLATTEN_AT", 0) or 0) or None,
+                   help="Close ALL positions automatically when this fraction of a "
+                        "loss budget is used, e.g. 0.95 (or env GUARDIAN_AUTO_FLATTEN_AT). "
+                        "Requires --enable-actions.")
+    p.add_argument("--digest-hour", default=os.environ.get("GUARDIAN_DIGEST_HOUR", "20"),
+                   help="UTC hour (0-23) to send the daily digest, or 'off' "
+                        "(default: 20, env GUARDIAN_DIGEST_HOUR).")
+    p.add_argument("--no-websocket", action="store_true",
+                   default=os.environ.get("GUARDIAN_WEBSOCKET", "").lower()
+                   in ("0", "false", "off", "no"),
+                   help="Don't use the Propr WebSocket for real-time reactions; "
+                        "rely on polling only (or env GUARDIAN_WEBSOCKET=off).")
+    p.add_argument("--ws-url", default=os.environ.get("PROPR_WS_URL", PROPR_WS_URL),
+                   help="Propr WebSocket URL (or env PROPR_WS_URL).")
     return p
 
 
@@ -146,7 +174,8 @@ def _state_path(args: argparse.Namespace, key: str) -> Path:
     return Path("state") / f"{re.sub(r'[^A-Za-z0-9._-]', '_', key)}.json"
 
 
-def _start_telegram_commands(args: argparse.Namespace) -> StatusBoard | None:
+def _start_telegram_commands(args: argparse.Namespace,
+                             action_clients: dict | None = None) -> StatusBoard | None:
     """Start the /status listener when Telegram is configured. Returns the
     board monitors should publish to, or None when commands are disabled."""
     token = os.environ.get("GUARDIAN_TELEGRAM_TOKEN")
@@ -154,12 +183,23 @@ def _start_telegram_commands(args: argparse.Namespace) -> StatusBoard | None:
     if args.no_telegram_commands or args.once or not (token and chat_id):
         return None
     board = StatusBoard()
-    TelegramCommandListener(token, chat_id, board).start()
+    TelegramCommandListener(token, chat_id, board, action_clients=action_clients).start()
     return board
 
 
+def _resolve_digest_hour(args: argparse.Namespace) -> int | None:
+    raw = str(args.digest_hour).strip().lower()
+    if raw in ("off", "none", "-1", ""):
+        return None
+    hour = int(raw)
+    if not 0 <= hour <= 23:
+        raise SystemExit(f"--digest-hour must be 0-23 or 'off', got {raw}")
+    return hour
+
+
 def _propr_job(args: argparse.Namespace, account: dict, alerters: list,
-               status_board: StatusBoard | None = None):
+               status_board: StatusBoard | None = None,
+               nudge=None):
     """Build a no-arg monitor job for one Propr account."""
     client = ProprClient(args.api_key, base_url=args.propr_url,
                          builder_id=args.builder_id)
@@ -179,6 +219,9 @@ def _propr_job(args: argparse.Namespace, account: dict, alerters: list,
         max_iterations=1 if args.once else None,
         trade_alerts=not args.no_trade_alerts,
         status_board=status_board,
+        auto_flatten_at=args.auto_flatten_at if args.enable_actions else None,
+        digest_hour=None if args.once else _resolve_digest_hour(args),
+        nudge=nudge,
     )
 
 
@@ -207,25 +250,53 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         alerters = build_alerters()
-        board = _start_telegram_commands(args)
+        if args.auto_flatten_at and not args.enable_actions:
+            print("⚠️  --auto-flatten-at is set but actions are disabled; add "
+                  "--enable-actions (or GUARDIAN_ACTIONS=on) to arm it.", flush=True)
+
         if args.all:
+            guarded = accounts
             print(f"Guarding all {len(accounts)} active account(s):\n"
                   f"{format_accounts(accounts)}", flush=True)
-            jobs = [_propr_job(args, acc, alerters, board) for acc in accounts]
-            return run_parallel(jobs)
+        else:
+            client.discover(args.account)
+            print(f"Found {client.kind} account: {client.account_id}", flush=True)
+            if len(accounts) > 1 and not args.account:
+                print(f"⚠️  You have {len(accounts) - 1} other active account(s) NOT "
+                      f"being guarded:\n{format_accounts(accounts)}\n"
+                      "Use --all to guard everything, or --account <number> per window.",
+                      flush=True)
+            guarded = [{
+                "kind": client.kind, "account_id": client.account_id,
+                "record_id": client.record_id, "record": client.record,
+            }]
 
-        client.discover(args.account)
-        print(f"Found {client.kind} account: {client.account_id}", flush=True)
-        if len(accounts) > 1 and not args.account:
-            print(f"⚠️  You have {len(accounts) - 1} other active account(s) NOT "
-                  f"being guarded:\n{format_accounts(accounts)}\n"
-                  "Use --all to guard everything, or --account <number> per window.",
-                  flush=True)
-        job = _propr_job(args, {
-            "kind": client.kind, "account_id": client.account_id,
-            "record_id": client.record_id, "record": client.record,
-        }, alerters, board)
-        return job()
+        # Dedicated clients for Telegram actions (threads must not share a
+        # requests.Session with the monitors).
+        action_clients = None
+        if args.enable_actions:
+            action_clients = {}
+            for acc in guarded:
+                c = ProprClient(args.api_key, base_url=args.propr_url,
+                                builder_id=args.builder_id)
+                c.select(acc)
+                action_clients[c.label] = c
+            print("Actions ENABLED: Telegram /close and /flatten are live.", flush=True)
+        board = _start_telegram_commands(args, action_clients)
+
+        nudges = []
+        jobs = []
+        for acc in guarded:
+            nudge = None if (args.no_websocket or args.once) else threading.Event()
+            if nudge is not None:
+                nudges.append(nudge)
+            jobs.append(_propr_job(args, acc, alerters, board, nudge))
+        if nudges:
+            WebSocketNudger(args.api_key, args.ws_url, nudges).start()
+
+        if len(jobs) == 1:
+            return jobs[0]()
+        return run_parallel(jobs)
 
     if args.address:
         if args.balance <= 0:

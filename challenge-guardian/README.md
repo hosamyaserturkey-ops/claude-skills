@@ -125,11 +125,44 @@ only from your own chat ID; everyone else is ignored:
   every guarded account
 - `/help` — command list
 
-Commands are read-only: the bot watches and warns, it never trades. Disable
-with `--no-telegram-commands` or `GUARDIAN_TELEGRAM_COMMANDS=off`. Telegram
-allows one command listener per bot token, so when running locally and hosted
-at the same time, leave commands enabled on only one of them (alerts are
-unaffected). Equity follows the official SDK formula
+With `--enable-actions` two more commands unlock:
+
+- `/close BTC` — close that asset's position(s) on every account
+- `/flatten` — close ALL open positions on every account
+
+Disable commands with `--no-telegram-commands` or
+`GUARDIAN_TELEGRAM_COMMANDS=off`. Telegram allows one command listener per
+bot token, so when running locally and hosted at the same time, leave
+commands enabled on only one of them (alerts are unaffected).
+
+## Actions and auto-flatten (opt-in)
+
+By default the bot is **read-only** — it never places orders. Starting it
+with `--enable-actions` (or `GUARDIAN_ACTIONS=on`) unlocks trading actions,
+all implemented as reduce-only IOC market orders that can only close
+existing positions, never open new ones:
+
+- Telegram `/close <ASSET>` and `/flatten`
+- `--auto-flatten-at 0.95` (or `GUARDIAN_AUTO_FLATTEN_AT=0.95`): the
+  last-resort safety net — when 95% of a daily-loss or drawdown budget is
+  consumed, the bot closes every open position automatically and tells you
+  what it did. Attempts are rate-limited to one per minute, and failures
+  alert loudly so you can act manually.
+
+## Real-time reactions (WebSocket)
+
+The bot connects to Propr's WebSocket and re-checks equity the moment any
+account event arrives (fills, position updates, balance changes), instead of
+waiting for the next 10-second poll. Polling stays on as the source of truth
+and the fallback — if the socket drops, nothing is lost. Disable with
+`--no-websocket` or `GUARDIAN_WEBSOCKET=off`.
+
+## Daily digest
+
+Once a day (default 20:00 UTC) each account gets a summary: realized PnL and
+win rate for the day, fees paid, loss-budget usage, open positions, and the
+distance to the profit target. Change the hour with `--digest-hour 18` or
+turn it off with `--digest-hour off` (`GUARDIAN_DIGEST_HOUR`). Equity follows the official SDK formula
 (`balance + totalUnrealizedPnl + isolatedPositionMargin`), and the server's
 `highWaterMark` is merged into the trailing-drawdown peak so the floor can
 only tighten, never loosen.
