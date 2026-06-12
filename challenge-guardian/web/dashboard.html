@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Challenge Guardian — dashboard</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e;
+          --accent:#2ea043; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  .top { display:flex; justify-content:space-between; align-items:center; }
+  a { color:#58a6ff; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:16px; margin-top:16px; }
+  .gauges { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+  .gauge { flex:1; min-width:200px; }
+  .gauge .bar { height:10px; border-radius:5px; background:var(--line); overflow:hidden; }
+  .gauge .fill { height:100%; background:var(--accent); transition: width .5s; }
+  .gauge.warn .fill { background:var(--warn); }
+  .gauge.bad .fill { background:var(--bad); }
+  .gauge small { color:var(--dim); }
+  .num { font-size:1.4rem; font-weight:600; }
+  #events div { padding:6px 0; border-bottom:1px solid var(--line); font-size:.85rem; }
+  #events time { color:var(--dim); margin-right:8px; }
+  #login { text-align:center; padding:48px 0; color:var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h2 style="margin:0">🛡️ Guardian dashboard</h2>
+    <a href="index.html">Settings</a>
+  </div>
+  <div id="login">Sign in on the <a href="index.html">settings page</a> first.</div>
+  <div id="content" style="display:none"></div>
+  <div class="card" id="events-card" style="display:none">
+    <h3 style="margin-top:0">Recent events</h3>
+    <div id="events"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script>
+const sb = supabase.createClient(GUARDIAN_CONFIG.SUPABASE_URL, GUARDIAN_CONFIG.SUPABASE_ANON_KEY);
+const accounts = {};   // label -> {chart, latest}
+
+function gaugePct(equity, floor, anchor) {
+  if (anchor === floor) return 0;
+  return Math.min(100, Math.max(0, ((anchor - equity) / (anchor - floor)) * 100));
+}
+
+function accountCard(label) {
+  const id = "acc-" + btoa(label).replace(/[^a-z0-9]/gi, "");
+  let card = document.getElementById(id);
+  if (card) return card;
+  card = document.createElement("div");
+  card.className = "card"; card.id = id;
+  card.innerHTML = `
+    <h3 style="margin-top:0">${label}</h3>
+    <div class="num" data-equity>—</div>
+    <div class="gauges">
+      <div class="gauge" data-daily>
+        <small>Daily loss budget used</small>
+        <div class="bar"><div class="fill" style="width:0%"></div></div>
+        <small data-text>—</small>
+      </div>
+      <div class="gauge" data-dd>
+        <small>Drawdown budget used</small>
+        <div class="bar"><div class="fill" style="width:0%"></div></div>
+        <small data-text>—</small>
+      </div>
+    </div>
+    <canvas height="110"></canvas>`;
+  document.getElementById("content").appendChild(card);
+  return card;
+}
+
+function upsertSample(s) {
+  const card = accountCard(s.account_label);
+  const acc = accounts[s.account_label] ??= { chart: null, rows: [] };
+  acc.rows.push(s);
+  if (acc.rows.length > 600) acc.rows.shift();
+
+  card.querySelector("[data-equity]").textContent =
+    "$" + Number(s.equity).toLocaleString(undefined, {minimumFractionDigits: 2});
+
+  const dailyPct = gaugePct(s.equity, s.daily_floor, s.peak ?? s.equity);
+  const ddPct = gaugePct(s.equity, s.dd_floor, s.peak ?? s.equity);
+  for (const [sel, pct, floor] of [["[data-daily]", dailyPct, s.daily_floor],
+                                   ["[data-dd]", ddPct, s.dd_floor]]) {
+    const g = card.querySelector(sel);
+    g.querySelector(".fill").style.width = pct + "%";
+    g.classList.toggle("warn", pct >= 70 && pct < 90);
+    g.classList.toggle("bad", pct >= 90);
+    g.querySelector("[data-text]").textContent =
+      pct.toFixed(0) + "% — breach floor $" + Number(floor).toLocaleString();
+  }
+
+  const labels = acc.rows.map(r => new Date(r.created_at).toLocaleTimeString());
+  const sets = [
+    { label: "equity", data: acc.rows.map(r => r.equity), borderColor: "#2ea043", tension: .3, pointRadius: 0 },
+    { label: "daily floor", data: acc.rows.map(r => r.daily_floor), borderColor: "#d29922", borderDash: [6,4], pointRadius: 0 },
+    { label: "drawdown floor", data: acc.rows.map(r => r.dd_floor), borderColor: "#f85149", borderDash: [2,4], pointRadius: 0 },
+  ];
+  if (!acc.chart) {
+    acc.chart = new Chart(card.querySelector("canvas"), {
+      type: "line",
+      data: { labels, datasets: sets },
+      options: { animation: false, plugins: { legend: { labels: { color: "#8b949e" } } },
+                 scales: { x: { ticks: { color: "#8b949e", maxTicksLimit: 8 } },
+                           y: { ticks: { color: "#8b949e" } } } },
+    });
+  } else {
+    acc.chart.data.labels = labels;
+    sets.forEach((s, i) => acc.chart.data.datasets[i].data = s.data);
+    acc.chart.update("none");
+  }
+}
+
+function addEvent(e, prepend = true) {
+  const div = document.createElement("div");
+  const t = new Date(e.created_at).toLocaleString();
+  div.innerHTML = `<time>${t}</time>${e.message.replace(/</g, "&lt;")}`;
+  const feed = document.getElementById("events");
+  prepend ? feed.prepend(div) : feed.append(div);
+  while (feed.children.length > 50) feed.lastChild.remove();
+}
+
+(async () => {
+  const { data: { user } } = await sb.auth.getUser();
+  if (!user) return;
+  document.getElementById("login").style.display = "none";
+  document.getElementById("content").style.display = "block";
+  document.getElementById("events-card").style.display = "block";
+
+  const { data: samples } = await sb.from("equity_samples").select("*")
+    .order("created_at", { ascending: false }).limit(600);
+  (samples || []).reverse().forEach(upsertSample);
+
+  const { data: events } = await sb.from("guardian_events").select("*")
+    .order("created_at", { ascending: false }).limit(50);
+  (events || []).forEach(e => addEvent(e, false));
+
+  sb.channel("live")
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "equity_samples" },
+        p => upsertSample(p.new))
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "guardian_events" },
+        p => addEvent(p.new))
+    .subscribe();
+})();
+</script>
+</body>
+</html>

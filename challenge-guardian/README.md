@@ -192,6 +192,44 @@ State (peak equity, daily anchor, sent alerts) persists to
 `state/<account>.json` so restarts don't loosen a trailing floor. If you start
 a brand-new challenge, delete the old state file first.
 
+## Multi-tenant service & dashboard
+
+The guardian can also run as a service for many traders at once: users sign
+up on a web page (magic-link email login), paste their own Propr API key,
+pick alert channels and features — and the worker guards everyone. A
+real-time dashboard shows equity curves, floor-proximity gauges, and the
+event feed per account. Powered by [Supabase](https://supabase.com) (free
+tier is fine to start).
+
+Setup:
+
+1. Create a Supabase project, open the SQL editor, and run
+   `supabase/schema.sql`. Enable the Email provider under Authentication.
+2. Put your project URL and anon key in `web/config.js`, then host the
+   `web/` folder anywhere static (GitHub Pages works: Settings → Pages →
+   serve from the repo). The anon key is safe to publish — row-level
+   security means each user can only read their own rows.
+3. Run the worker with two extra environment variables (Project Settings →
+   API → service_role key — this one stays secret, server-side only):
+
+```bash
+export SUPABASE_URL="https://yourproject.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="eyJ..."
+python -m guardian --multi-tenant
+```
+
+The worker re-reads the tenants table every minute: new signups start
+guarding automatically, saved settings restart that user's guard, and
+deactivating stops it. Each tenant gets their own alert channels and
+Telegram command listener; trading actions and auto-flatten stay opt-in
+per user.
+
+Security note (v1): tenant API keys are stored in Postgres protected by
+row-level security and Supabase's encryption at rest, readable only via
+the service-role key. Before offering this to strangers, consider
+column-level encryption (pgsodium/Vault) and a privacy policy — Propr keys
+have full account access.
+
 ## Run the tests
 
 ```bash

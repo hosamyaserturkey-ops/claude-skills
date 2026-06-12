@@ -39,6 +39,7 @@ def run_monitor(
     auto_flatten_at: float | None = None,
     digest_hour: int | None = None,
     nudge=None,
+    stop_event=None,
 ) -> int:
     """Run the monitoring loop. Returns an exit code (0 = passed/stopped, 2 = breached)."""
     state = load_state(state_path)
@@ -58,6 +59,9 @@ def run_monitor(
     iteration = 0
     last_flatten_attempt = 0.0
     while True:
+        if stop_event is not None and stop_event.is_set():
+            print(f"{label}: stop requested, exiting monitor.", flush=True)
+            return 0
         iteration += 1
         try:
             snapshot = client.fetch_snapshot()
