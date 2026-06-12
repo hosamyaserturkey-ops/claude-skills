@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Challenge Guardian — never fail a Propr challenge by accident</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e;
+          --accent:#2ea043; --warn:#d29922; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.6rem; } h1 span { color: var(--accent); }
+  p.lead { color: var(--dim); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:20px; margin-top:16px; }
+  label { display:block; margin:14px 0 4px; font-size:.9rem; color:var(--dim); }
+  input, select { width:100%; padding:10px; border-radius:6px; border:1px solid var(--line);
+          background:var(--bg); color:var(--text); font-size:1rem; }
+  input[type=checkbox] { width:auto; }
+  button { margin-top:18px; width:100%; padding:12px; border:0; border-radius:6px;
+          background:var(--accent); color:#fff; font-size:1rem; cursor:pointer; }
+  button.secondary { background:transparent; border:1px solid var(--line); color:var(--dim); }
+  .msg { margin-top:12px; padding:10px; border-radius:6px; background:#1f6feb22; display:none; }
+  .danger { border:1px solid var(--warn); border-radius:8px; padding:12px; margin-top:16px;
+          font-size:.85rem; color:var(--warn); }
+  a { color:#58a6ff; }
+  .row { display:flex; gap:10px; align-items:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛡️ Challenge <span>Guardian</span></h1>
+  <p class="lead">Real-time breach protection for your Propr challenge.
+  Phone alerts before you hit a daily-loss or drawdown limit, trade
+  notifications, daily digests — and an optional automatic safety net.
+  Read-only by default; your key is used to watch, not to trade.</p>
+
+  <div id="auth" class="card">
+    <h3>Sign in</h3>
+    <label for="email">Email — we'll send you a magic link, no password needed</label>
+    <input id="email" type="email" placeholder="you@example.com" autocomplete="email">
+    <button id="send-link">Send magic link</button>
+    <div id="auth-msg" class="msg"></div>
+  </div>
+
+  <div id="settings" class="card" style="display:none">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">Your guardian</h3>
+      <a href="dashboard.html">Open dashboard →</a>
+    </div>
+
+    <label for="api-key">Propr API key (starts with pk_live_) —
+      <a href="https://app.propr.xyz/settings" target="_blank" rel="noopener">get it here</a></label>
+    <input id="api-key" placeholder="pk_live_...">
+
+    <label for="preset">Challenge type</label>
+    <select id="preset">
+      <option value="1step">1-Step</option>
+      <option value="2step-1">2-Step — Step 1</option>
+      <option value="2step-2">2-Step — Step 2</option>
+      <option value="funded">Funded account</option>
+    </select>
+
+    <label for="tg-token">Telegram bot token (optional — create one with @BotFather)</label>
+    <input id="tg-token" placeholder="123456:ABC...">
+    <label for="tg-chat">Telegram chat id</label>
+    <input id="tg-chat" placeholder="123456789">
+
+    <label for="discord">Discord webhook URL (optional)</label>
+    <input id="discord" placeholder="https://discord.com/api/webhooks/...">
+
+    <label for="digest">Daily digest hour (UTC, 0–23; leave empty for none)</label>
+    <input id="digest" type="number" min="0" max="23" placeholder="20">
+
+    <div class="danger">
+      <div class="row">
+        <input type="checkbox" id="actions">
+        <label for="actions" style="margin:0; color:var(--warn)">
+          Enable actions (/close, /flatten, auto-flatten) — the guardian may
+          place <b>reduce-only</b> orders that close positions. Never opens new ones.
+        </label>
+      </div>
+      <label for="auto-flatten" style="margin-top:10px">Auto-flatten at fraction of
+        loss budget (e.g. 0.95; empty = off)</label>
+      <input id="auto-flatten" type="number" step="0.01" min="0.5" max="1" placeholder="0.95">
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <input type="checkbox" id="active" checked>
+      <label for="active" style="margin:0">Guardian active</label>
+    </div>
+
+    <button id="save">Save — guardian (re)starts within a minute</button>
+    <button id="signout" class="secondary">Sign out</button>
+    <div id="save-msg" class="msg"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script>
+const sb = supabase.createClient(GUARDIAN_CONFIG.SUPABASE_URL, GUARDIAN_CONFIG.SUPABASE_ANON_KEY);
+const $ = (id) => document.getElementById(id);
+const show = (id, text) => { const el = $(id); el.style.display = "block"; el.textContent = text; };
+
+$("send-link").onclick = async () => {
+  const email = $("email").value.trim();
+  if (!email) return show("auth-msg", "Enter your email first.");
+  const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.href } });
+  show("auth-msg", error ? "Error: " + error.message
+                         : "Check your inbox and click the link to sign in.");
+};
+
+$("signout").onclick = async () => { await sb.auth.signOut(); location.reload(); };
+
+async function loadSettings(userId) {
+  const { data } = await sb.from("tenants").select("*").eq("user_id", userId).maybeSingle();
+  if (!data) return;
+  $("api-key").value = data.propr_api_key || "";
+  $("preset").value = data.preset || "1step";
+  $("tg-token").value = data.telegram_token || "";
+  $("tg-chat").value = data.telegram_chat_id || "";
+  $("discord").value = data.discord_webhook || "";
+  $("digest").value = data.digest_hour ?? "";
+  $("actions").checked = !!data.enable_actions;
+  $("auto-flatten").value = data.auto_flatten_at ?? "";
+  $("active").checked = !!data.active;
+}
+
+$("save").onclick = async () => {
+  const { data: { user } } = await sb.auth.getUser();
+  if (!user) return;
+  const key = $("api-key").value.trim();
+  if (!key.startsWith("pk_")) return show("save-msg", "That doesn't look like a Propr API key.");
+  const row = {
+    user_id: user.id,
+    propr_api_key: key,
+    preset: $("preset").value,
+    telegram_token: $("tg-token").value.trim() || null,
+    telegram_chat_id: $("tg-chat").value.trim() || null,
+    discord_webhook: $("discord").value.trim() || null,
+    digest_hour: $("digest").value === "" ? null : Number($("digest").value),
+    enable_actions: $("actions").checked,
+    auto_flatten_at: $("auto-flatten").value === "" ? null : Number($("auto-flatten").value),
+    active: $("active").checked,
+  };
+  const { error } = await sb.from("tenants").upsert(row, { onConflict: "user_id" });
+  show("save-msg", error ? "Error: " + error.message
+                         : "Saved. Your guardian picks this up within a minute.");
+};
+
+(async () => {
+  const { data: { user } } = await sb.auth.getUser();
+  if (user) {
+    $("auth").style.display = "none";
+    $("settings").style.display = "block";
+    loadSettings(user.id);
+  }
+})();
+</script>
+</body>
+</html>

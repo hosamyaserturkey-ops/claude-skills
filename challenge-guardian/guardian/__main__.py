@@ -127,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "rely on polling only (or env GUARDIAN_WEBSOCKET=off).")
     p.add_argument("--ws-url", default=os.environ.get("PROPR_WS_URL", PROPR_WS_URL),
                    help="Propr WebSocket URL (or env PROPR_WS_URL).")
+    p.add_argument("--multi-tenant", action="store_true",
+                   default=os.environ.get("GUARDIAN_MULTI_TENANT", "").lower()
+                   in ("1", "true", "on", "yes"),
+                   help="Run the multi-tenant worker: guard every active signup "
+                        "in the Supabase tenants table (needs SUPABASE_URL and "
+                        "SUPABASE_SERVICE_ROLE_KEY; or env GUARDIAN_MULTI_TENANT=true).")
     return p
 
 
@@ -230,6 +236,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from . import __version__
     print(f"Challenge Guardian v{__version__}", flush=True)
+
+    if args.multi_tenant:
+        from .tenants import SupabaseStore, TenantRunner
+        url = os.environ.get("SUPABASE_URL")
+        service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not url or not service_key:
+            print("Multi-tenant mode needs SUPABASE_URL and "
+                  "SUPABASE_SERVICE_ROLE_KEY.", file=sys.stderr)
+            return 1
+        TenantRunner(SupabaseStore(url, service_key)).loop()
+        return 0
 
     if args.api_key:
         client = ProprClient(args.api_key, base_url=args.propr_url,
