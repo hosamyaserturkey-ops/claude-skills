@@ -212,30 +212,38 @@ class ProprClient:
     def close_position(self, position: dict) -> dict:
         """Close one position with a reduce-only IOC market order.
 
-        Propr's live engine (error 13096) requires the order side to ALIGN
-        with positionSide (buy+long / sell+short) and infers the close intent
-        from reduceOnly+closePosition — while its docs show the opposite-side
-        convention. Try the live engine's way first and fall back to the
-        documented way on a 400. reduceOnly makes both attempts incapable of
-        increasing exposure, so the worst case is a rejection, never a bigger
-        position."""
-        aligned = "buy" if (position.get("positionSide") or "").lower() == "long" else "sell"
+        Propr's docs and live engine disagree on the (side, positionSide)
+        convention for closes (live error 13096 vs the docs' opposite-side
+        example), so try every plausible convention in sequence. All attempts
+        are reduceOnly — incapable of increasing exposure — so the worst case
+        is a rejection, never a bigger position."""
+        pos_side = (position.get("positionSide") or "").lower()
+        aligned = "buy" if pos_side == "long" else "sell"
         opposite = "sell" if aligned == "buy" else "buy"
-        try:
-            return self._submit_close(position, aligned)
-        except RuntimeError as exc:
-            if "(400)" not in str(exc):
-                raise
-            return self._submit_close(position, opposite)
+        flipped = "long" if pos_side == "short" else "short"
+        candidates = [
+            (aligned, pos_side),    # error 13096: side aligns with positionSide
+            (opposite, pos_side),   # docs example: opposite side, same positionSide
+            (opposite, flipped),    # netting style: order labeled by its own direction
+        ]
+        errors = []
+        for side, p_side in candidates:
+            try:
+                return self._submit_close(position, side, p_side)
+            except RuntimeError as exc:
+                if "(400)" not in str(exc):
+                    raise
+                errors.append(f"[{side}/{p_side}] {exc}")
+        raise RuntimeError("all close conventions rejected: " + " | ".join(errors))
 
-    def _submit_close(self, position: dict, side: str) -> dict:
+    def _submit_close(self, position: dict, side: str, position_side: str) -> dict:
         order = {
             "accountId": self.account_id,
             "intentId": new_ulid(),
             "exchange": position.get("exchange", "hyperliquid"),
             "type": "market",
             "side": side,
-            "positionSide": position.get("positionSide"),
+            "positionSide": position_side,
             "productType": position.get("productType", "perp"),
             "timeInForce": "IOC",
             "asset": position.get("asset") or position.get("base"),

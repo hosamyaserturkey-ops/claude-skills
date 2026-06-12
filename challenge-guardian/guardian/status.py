@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
+from . import __version__
+
 
 class StatusBoard:
     """Thread-safe snapshot of every guarded account's latest numbers."""
@@ -22,9 +24,11 @@ class StatusBoard:
     def render(self) -> str:
         with self._lock:
             accounts = {k: dict(v) for k, v in self._accounts.items()}
+        header = f"Challenge Guardian v{__version__}"
         if not accounts:
-            return "No accounts being guarded yet — give me a few seconds after startup."
-        lines = []
+            return (f"{header}\nNo accounts being guarded yet — "
+                    "give me a few seconds after startup.")
+        lines = [header]
         for label, e in accounts.items():
             age = time.time() - e.get("updated_at", 0)
             stale = " ⚠️ STALE" if age > 60 else ""

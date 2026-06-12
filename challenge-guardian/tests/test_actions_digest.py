@@ -74,22 +74,37 @@ def test_close_position_builds_reduce_only_market_order():
     assert len(order["intentId"]) == 26
 
 
-def test_close_position_falls_back_to_opposite_side_on_400():
+def test_close_position_falls_back_through_conventions_on_400():
     client = OrderCaptureClient([LONG_BTC])
     original = client._post
     attempts = []
 
     def reject_aligned(path, payload):
-        side = payload["orders"][0]["side"]
-        attempts.append(side)
-        if side == "buy":  # pretend this engine wants the documented convention
+        order = payload["orders"][0]
+        attempts.append((order["side"], order["positionSide"]))
+        if order["side"] == "buy":  # pretend this engine wants the documented convention
             raise RuntimeError(f"POST {path} failed (400): order_side_must_align")
         return original(path, payload)
 
     client._post = reject_aligned
     result = client.close_position(LONG_BTC)
     assert result["status"] == "filled"
-    assert attempts == ["buy", "sell"]   # aligned first, opposite on 400
+    assert attempts == [("buy", "long"), ("sell", "long")]
+
+
+def test_close_position_reports_all_failed_conventions():
+    client = OrderCaptureClient([SHORT_ETH])
+    attempts = []
+
+    def reject_all(path, payload):
+        order = payload["orders"][0]
+        attempts.append((order["side"], order["positionSide"]))
+        raise RuntimeError(f"POST {path} failed (400): nope")
+
+    client._post = reject_all
+    with pytest.raises(RuntimeError, match="all close conventions rejected"):
+        client.close_position(SHORT_ETH)
+    assert attempts == [("sell", "short"), ("buy", "short"), ("buy", "long")]
 
 
 def test_close_position_does_not_retry_non_400():

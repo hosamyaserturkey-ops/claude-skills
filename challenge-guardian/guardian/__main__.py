@@ -228,6 +228,8 @@ def _propr_job(args: argparse.Namespace, account: dict, alerters: list,
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     args = build_parser().parse_args(argv)
+    from . import __version__
+    print(f"Challenge Guardian v{__version__}", flush=True)
 
     if args.api_key:
         client = ProprClient(args.api_key, base_url=args.propr_url,
