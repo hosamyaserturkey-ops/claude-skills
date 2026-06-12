@@ -188,13 +188,47 @@ class ProprClient:
             raise RuntimeError(f"POST {path} failed ({resp.status_code}): {resp.text[:300]}")
         return resp.json()
 
+    def fetch_open_orders(self, base: str | None = None) -> list[dict]:
+        orders = self._items(
+            self._get(f"/accounts/{self.account_id}/orders", params={"status": "open"})
+        )
+        if base:
+            orders = [o for o in orders if (o.get("base") or "").upper() == base.upper()]
+        return orders
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel one order. True = cancelled; False = already filled/cancelled
+        (a 400 here is benign per the Propr docs)."""
+        resp = self.session.post(
+            f"{self.base_url}/accounts/{self.account_id}/orders/{order_id}/cancel",
+            timeout=self.timeout,
+        )
+        if resp.status_code in (200, 201):
+            return True
+        if resp.status_code == 400:
+            return False
+        raise RuntimeError(f"cancel {order_id} failed ({resp.status_code}): {resp.text[:200]}")
+
     def close_position(self, position: dict) -> dict:
         """Close one position with a reduce-only IOC market order.
 
-        Per the Propr docs: reduceOnly prevents accidentally opening an
-        opposing position, closePosition closes the full size, and IOC stops
-        the market order from resting on the book."""
-        side = "sell" if (position.get("positionSide") or "").lower() == "long" else "buy"
+        Propr's live engine (error 13096) requires the order side to ALIGN
+        with positionSide (buy+long / sell+short) and infers the close intent
+        from reduceOnly+closePosition — while its docs show the opposite-side
+        convention. Try the live engine's way first and fall back to the
+        documented way on a 400. reduceOnly makes both attempts incapable of
+        increasing exposure, so the worst case is a rejection, never a bigger
+        position."""
+        aligned = "buy" if (position.get("positionSide") or "").lower() == "long" else "sell"
+        opposite = "sell" if aligned == "buy" else "buy"
+        try:
+            return self._submit_close(position, aligned)
+        except RuntimeError as exc:
+            if "(400)" not in str(exc):
+                raise
+            return self._submit_close(position, opposite)
+
+    def _submit_close(self, position: dict, side: str) -> dict:
         order = {
             "accountId": self.account_id,
             "intentId": new_ulid(),
@@ -215,9 +249,26 @@ class ProprClient:
         return (self._items(result) or [result])[0]
 
     def flatten_positions(self, base: str | None = None) -> list[dict]:
-        """Close all open positions (optionally only for one asset).
-        Returns one result dict per position: {'position', 'ok', 'detail'}."""
+        """Cancel open orders, then close all open positions (optionally only
+        for one asset). Orders go first so a fill can't re-open exposure
+        mid-flatten. Returns one result dict per item:
+        {'position', 'ok', 'detail'}."""
         results = []
+        try:
+            open_orders = self.fetch_open_orders(base)
+        except Exception as exc:
+            results.append({"position": "open orders", "ok": False,
+                            "detail": f"could not list: {exc}"})
+            open_orders = []
+        for order in open_orders:
+            desc = (f"order {(order.get('side') or '?').upper()} "
+                    f"{order.get('quantity')} {order.get('base')}")
+            try:
+                cancelled = self.cancel_order(order.get("orderId", ""))
+                results.append({"position": desc, "ok": True,
+                                "detail": "cancelled" if cancelled else "already filled/cancelled"})
+            except Exception as exc:
+                results.append({"position": desc, "ok": False, "detail": str(exc)})
         for position in self.fetch_open_positions():
             if base and (position.get("base") or "").upper() != base.upper():
                 continue

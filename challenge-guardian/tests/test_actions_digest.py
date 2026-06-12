@@ -25,14 +25,25 @@ def test_ulid_format_and_uniqueness():
 
 
 class OrderCaptureClient(ProprClient):
-    def __init__(self, positions):
+    def __init__(self, positions, orders=None):
         super().__init__(api_key="pk_test_fake")
         self.account_id = "urn:prp-account:abc"
         self.positions = positions
+        self.orders = orders or []
         self.posted: list[tuple[str, dict]] = []
+        self.cancelled: list[str] = []
 
     def fetch_open_positions(self):
         return self.positions
+
+    def fetch_open_orders(self, base=None):
+        if base:
+            return [o for o in self.orders if o.get("base", "").upper() == base.upper()]
+        return self.orders
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        return True
 
     def _post(self, path, payload):
         self.posted.append((path, payload))
@@ -52,7 +63,9 @@ def test_close_position_builds_reduce_only_market_order():
     path, payload = client.posted[0]
     assert path == "/accounts/urn:prp-account:abc/orders"
     order = payload["orders"][0]
-    assert order["side"] == "sell"            # closing a long sells
+    # Live API error 13096: side must align with positionSide (buy+long).
+    assert order["side"] == "buy"
+    assert order["positionSide"] == "long"
     assert order["reduceOnly"] is True
     assert order["closePosition"] is True
     assert order["type"] == "market"
@@ -61,16 +74,65 @@ def test_close_position_builds_reduce_only_market_order():
     assert len(order["intentId"]) == 26
 
 
+def test_close_position_falls_back_to_opposite_side_on_400():
+    client = OrderCaptureClient([LONG_BTC])
+    original = client._post
+    attempts = []
+
+    def reject_aligned(path, payload):
+        side = payload["orders"][0]["side"]
+        attempts.append(side)
+        if side == "buy":  # pretend this engine wants the documented convention
+            raise RuntimeError(f"POST {path} failed (400): order_side_must_align")
+        return original(path, payload)
+
+    client._post = reject_aligned
+    result = client.close_position(LONG_BTC)
+    assert result["status"] == "filled"
+    assert attempts == ["buy", "sell"]   # aligned first, opposite on 400
+
+
+def test_close_position_does_not_retry_non_400():
+    client = OrderCaptureClient([LONG_BTC])
+
+    def server_error(path, payload):
+        raise RuntimeError(f"POST {path} failed (500): boom")
+
+    client._post = server_error
+    with pytest.raises(RuntimeError, match="500"):
+        client.close_position(LONG_BTC)
+
+
 def test_flatten_closes_everything_and_filters_by_base():
     client = OrderCaptureClient([LONG_BTC, SHORT_ETH])
     results = client.flatten_positions()
     assert [r["ok"] for r in results] == [True, True]
     sides = [p["orders"][0]["side"] for _, p in client.posted]
-    assert sides == ["sell", "buy"]           # close long sells, close short buys
+    assert sides == ["buy", "sell"]           # aligned: buy+long, sell+short
 
     client.posted.clear()
     results = client.flatten_positions(base="eth")
     assert len(results) == 1 and "ETH" in results[0]["position"]
+
+
+def test_flatten_cancels_open_orders_first():
+    resting = {"orderId": "urn:prp-order:r1", "side": "buy", "quantity": "0.1",
+               "base": "BTC"}
+    client = OrderCaptureClient([LONG_BTC], orders=[resting])
+    results = client.flatten_positions()
+    assert client.cancelled == ["urn:prp-order:r1"]
+    assert results[0]["ok"] and "order BUY 0.1 BTC" in results[0]["position"]
+    assert results[0]["detail"] == "cancelled"
+    assert results[1]["ok"] and "LONG" in results[1]["position"]
+
+
+def test_flatten_with_only_resting_order_reports_it():
+    resting = {"orderId": "urn:prp-order:r2", "side": "sell", "quantity": "1",
+               "base": "ETH"}
+    client = OrderCaptureClient([], orders=[resting])
+    results = client.flatten_positions()
+    assert len(results) == 1
+    assert results[0]["detail"] == "cancelled"
 
 
 def test_flatten_continues_after_one_failure():

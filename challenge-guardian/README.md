@@ -127,8 +127,11 @@ only from your own chat ID; everyone else is ignored:
 
 With `--enable-actions` two more commands unlock:
 
-- `/close BTC` — close that asset's position(s) on every account
-- `/flatten` — close ALL open positions on every account
+- `/close BTC` — cancel that asset's resting orders and close its position(s)
+  on every account
+- `/flatten` — cancel ALL resting orders and close ALL open positions on
+  every account (orders are cancelled first so a late fill can't re-open
+  exposure mid-flatten)
 
 Disable commands with `--no-telegram-commands` or
 `GUARDIAN_TELEGRAM_COMMANDS=off`. Telegram allows one command listener per
