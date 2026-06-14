@@ -24,7 +24,7 @@ create or replace function touch_updated_at() returns trigger as $$
 begin
   new.updated_at = now();
   return new;
-end $$ language plpgsql;
+end $$ language plpgsql set search_path = '';
 
 drop trigger if exists tenants_touch on tenants;
 create trigger tenants_touch before update on tenants
