@@ -30,6 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+        # Create/enable the Pages site (build_type=workflow) if it isn't yet,
+        # using the job's pages:write token — no manual repo setting needed.
+        with:
+          enablement: true
       - name: Upload web/ as the Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
