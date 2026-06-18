@@ -1,0 +1,38 @@
+name: Deploy Guardian web to Pages
+
+# Publishes challenge-guardian/web/ (signup + dashboard) to GitHub Pages.
+# Requires: repo Settings → Pages → Source = "GitHub Actions" (one-time).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "challenge-guardian/web/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+# Least-privilege permissions needed to publish to Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a newer run cancel an in-progress one; never cancel a finished deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Upload web/ as the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: challenge-guardian/web
+      - id: deployment
+        uses: actions/deploy-pages@v4
